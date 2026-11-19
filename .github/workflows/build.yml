@@ -23,17 +23,26 @@ jobs:
         with:
           gradle-version: "8.11.1"
 
+      - name: Get time-stretch libraries
+        run: |
+          mkdir -p app/src/main/cpp/deps && cd app/src/main/cpp/deps
+          git clone --depth 1 https://github.com/Signalsmith-Audio/signalsmith-stretch.git signalsmith-stretch
+          git clone --depth 1 https://github.com/Signalsmith-Audio/linear.git signalsmith-linear
+          git clone --depth 1 --branch v4.0.0 https://github.com/breakfastquay/rubberband.git rubberband \
+            || git clone --depth 1 https://github.com/breakfastquay/rubberband.git rubberband
+          ls signalsmith-stretch signalsmith-linear rubberband/single
+
       - name: Build
         run: gradle :app:assembleRelease --no-daemon --stacktrace
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/release/app-release.apk LoopPractice.apk
+        run: cp app/build/outputs/apk/release/app-release.apk MusicPractice.apk
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: Loop Practice build ${{ github.run_number }}
-          body: "Download LoopPractice.apk below on your phone and open it to install."
-          files: LoopPractice.apk
+          name: Music Practice build ${{ github.run_number }}
+          body: "Download MusicPractice.apk below on your phone and open it to install."
+          files: MusicPractice.apk
           make_latest: true

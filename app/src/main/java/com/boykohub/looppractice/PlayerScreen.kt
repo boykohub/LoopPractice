@@ -34,6 +34,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -88,7 +90,7 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
         // ---------- header ----------
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("Loop Practice", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                Text("Music Practice", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                 Text(
                     if (vm.uri == null) "No file loaded" else vm.fileName,
                     style = MaterialTheme.typography.titleMedium,
@@ -107,14 +109,15 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
             }
             Text(
                 "MP3, WAV, FLAC, M4A/AAC, OGG, Opus, and the audio from video files. " +
-                    "You can also pick \"Loop Practice\" when opening a file from Files or Drive.",
+                    "You can also pick \"Music Practice\" when opening a file from Files or Drive.",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color.Gray
             )
             return@Column
         }
 
-        // ---------- timeline ----------
+        // ---------- waveform ----------
+        ScrollingWaveform(vm)
         Timeline(vm)
         Row {
             Text(fmt(vm.positionMs), fontFamily = FontFamily.Monospace, fontSize = 20.sp, fontWeight = FontWeight.Bold)
@@ -123,15 +126,22 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
         }
 
         // ---------- transport ----------
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedButton(onClick = { vm.toStart() }, modifier = Modifier.weight(1f)) { Text("|◀") }
-            OutlinedButton(onClick = { vm.skip(-5000) }, modifier = Modifier.weight(1f)) { Text("−5s") }
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            SmallKey("|◀", Modifier.weight(1f)) { vm.toStart() }
+            SmallKey("−5", Modifier.weight(1f)) { vm.skip(-5000) }
+            SmallKey("−1", Modifier.weight(1f)) { vm.skip(-1000) }
             Button(
                 onClick = { vm.togglePlay() },
-                modifier = Modifier.weight(1.4f).height(56.dp)
+                modifier = Modifier.weight(1.5f).height(56.dp),
+                contentPadding = ButtonDefaults.TextButtonContentPadding
             ) { Text(if (vm.isPlaying) "❚❚" else "▶", fontSize = 22.sp) }
-            OutlinedButton(onClick = { vm.skip(5000) }, modifier = Modifier.weight(1f)) { Text("+5s") }
+            SmallKey("+1", Modifier.weight(1f)) { vm.skip(1000) }
+            SmallKey("+5", Modifier.weight(1f)) { vm.skip(5000) }
         }
+        Text(
+            "−1 / +1 and −5 / +5 jump in seconds. While a loop is playing they stay inside the loop.",
+            style = MaterialTheme.typography.bodySmall, color = Color.Gray
+        )
 
         // ---------- loops ----------
         Section("Loops") {
@@ -145,7 +155,7 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
                     val selected = vm.selectedId == l.id
                     Box(
                         Modifier
-                            .size(width = 64.dp, height = 56.dp)
+                            .size(width = 72.dp, height = 56.dp)
                             .clip(RoundedCornerShape(12.dp))
                             .background(if (active) c else c.copy(alpha = 0.18f))
                             .combinedClickable(
@@ -155,8 +165,8 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            (if (active) "↻ " else "") + l.id,
-                            fontSize = 22.sp,
+                            (if (active) "↻" else "") + l.id + (l.next?.let { "→$it" } ?: ""),
+                            fontSize = if (l.next != null) 17.sp else 22.sp,
                             fontWeight = if (selected) FontWeight.Black else FontWeight.Medium,
                             color = if (active) Color.Black else c
                         )
@@ -204,6 +214,36 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
                     TextButton(onClick = { vm.deleteSelected() }) { Text("Delete", color = Color(0xFFFF8FA3)) }
                 }
                 Text("Length ${fmt(l.end - l.start)}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+
+                // ---- chaining ----
+                Text("Then play", style = MaterialTheme.typography.bodyMedium)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val none = l.next == null
+                    if (none) Button(onClick = {}, contentPadding = ButtonDefaults.TextButtonContentPadding) { Text("Keep looping") }
+                    else OutlinedButton(onClick = { vm.setNext(l.id, null) }, contentPadding = ButtonDefaults.TextButtonContentPadding) { Text("Keep looping") }
+                    vm.loops.filter { it.id != l.id }.forEach { o ->
+                        val on = l.next == o.id
+                        if (on) Button(
+                            onClick = {},
+                            colors = ButtonDefaults.buttonColors(containerColor = loopColor(o.id), contentColor = Color.Black),
+                            contentPadding = ButtonDefaults.TextButtonContentPadding
+                        ) { Text("→ ${o.id}") }
+                        else OutlinedButton(onClick = { vm.setNext(l.id, o.id) }, contentPadding = ButtonDefaults.TextButtonContentPadding) {
+                            Text("→ ${o.id}", color = loopColor(o.id))
+                        }
+                    }
+                }
+                if (l.next != null) {
+                    Stepper(
+                        "Plays", "${l.repeats}×",
+                        { vm.setRepeats(l.id, (l.repeats - 1).coerceAtLeast(1)) },
+                        { vm.setRepeats(l.id, l.repeats + 1) }
+                    )
+                    Text(
+                        "Loop ${l.id} plays ${l.repeats}× then goes to ${l.next}. Set ${l.next} to go somewhere else for a longer chain.",
+                        style = MaterialTheme.typography.bodySmall, color = Color.Gray
+                    )
+                }
             }
         }
 
@@ -223,6 +263,23 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
                     }
                 }
             }
+        }
+
+        // ---------- stretch algorithm ----------
+        Section("Stretch sound") {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(StretchProcessor.MODE_MELODY to "Melody", StretchProcessor.MODE_DRUMS to "Drums").forEach { (m, t) ->
+                    if (vm.stretchMode == m) Button(onClick = {}, modifier = Modifier.weight(1f)) { Text(t) }
+                    else OutlinedButton(onClick = { vm.changeStretchMode(m) }, modifier = Modifier.weight(1f)) { Text(t) }
+                }
+            }
+            Text(
+                if (vm.stretchMode == StretchProcessor.MODE_MELODY)
+                    "Signalsmith Stretch: smooth and natural for melodies, chords and vocals."
+                else
+                    "Rubber Band (crisp transients): keeps drum hits and attacks sharp.",
+                style = MaterialTheme.typography.bodySmall, color = Color.Gray
+            )
         }
 
         // ---------- pitch ----------
@@ -316,6 +373,21 @@ fun Timeline(vm: PracticeEngine) {
         drawRoundRect(Color(0xFF22252B), cornerRadius = CornerRadius(14f, 14f))
         if (dur <= 0) return@Canvas
 
+        val pk = vm.peaks
+        if (pk.isNotEmpty()) {
+            val totalBuckets = (dur / WaveformLoader.BUCKET_MS).toInt().coerceAtLeast(1)
+            val step = 3f
+            var x = 0f
+            while (x < w) {
+                val a = (x / w * totalBuckets).toInt()
+                val b = ((x + step) / w * totalBuckets).toInt().coerceAtLeast(a + 1)
+                var m = 0f
+                for (i in a until b.coerceAtMost(pk.size)) if (pk[i] > m) m = pk[i]
+                val hh = (m * h * 0.42f).coerceAtLeast(0.5f)
+                drawRect(Color(0x66FFFFFF), topLeft = Offset(x, h / 2f - hh), size = Size(step - 1f, hh * 2f))
+                x += step
+            }
+        }
         val laneH = 22f * density / 2.5f + 18f
         vm.loops.forEachIndexed { i, l ->
             val x0 = l.start.toFloat() / dur * w
@@ -338,5 +410,128 @@ fun Timeline(vm: PracticeEngine) {
         }
         val px = vm.positionMs.toFloat() / dur * w
         drawRect(Color.White, topLeft = Offset(px - 2f, 0f), size = Size(4f, h))
+    }
+}
+
+@Composable
+fun SmallKey(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier.height(48.dp),
+        contentPadding = ButtonDefaults.TextButtonContentPadding
+    ) { Text(label, fontSize = 15.sp) }
+}
+
+/**
+ * Zoomed, moving waveform: the playhead sits in the middle and the audio scrolls past.
+ * Drag to scrub, tap to jump, pinch to zoom.
+ */
+@Composable
+fun ScrollingWaveform(vm: PracticeEngine) {
+    var windowMs by androidx.compose.runtime.saveable.rememberSaveable { androidx.compose.runtime.mutableFloatStateOf(8000f) }
+    val measurer = rememberTextMeasurer()
+    val dur = vm.durationMs
+    val peaks = vm.peaks
+    val waveColor = MaterialTheme.colorScheme.primary
+    Column {
+        Canvas(
+            Modifier
+                .fillMaxWidth()
+                .height(150.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color(0xFF1A1C21))
+                .pointerInput(dur) {
+                    detectTapGestures { o ->
+                        if (dur > 0) {
+                            val msPerPx = windowMs / size.width
+                            vm.seekTo((vm.positionMs + (o.x - size.width / 2f) * msPerPx).toLong())
+                        }
+                    }
+                }
+                .pointerInput(dur) {
+                    androidx.compose.foundation.gestures.awaitEachGesture {
+                        androidx.compose.foundation.gestures.awaitFirstDown(requireUnconsumed = false)
+                        var dragged = false
+                        do {
+                            val ev = awaitPointerEvent()
+                            val zoom = androidx.compose.foundation.gestures.calculateZoom(ev)
+                            val pan = androidx.compose.foundation.gestures.calculatePan(ev)
+                            if (ev.changes.size >= 2 && zoom != 1f) {
+                                windowMs = (windowMs / zoom).coerceIn(1500f, 120_000f)
+                                ev.changes.forEach { it.consume() }
+                            } else if (ev.changes.size == 1 && kotlin.math.abs(pan.x) > 0.5f && dur > 0) {
+                                val msPerPx = windowMs / size.width
+                                vm.scrubTo((vm.positionMs - pan.x * msPerPx).toLong())
+                                dragged = true
+                                ev.changes.forEach { it.consume() }
+                            }
+                        } while (ev.changes.any { it.pressed })
+                        if (dragged) vm.endScrub()
+                    }
+                }
+        ) {
+            val w = size.width
+            val h = size.height
+            val mid = h / 2f
+            if (dur <= 0) return@Canvas
+            val msPerPx = windowMs / w
+            val pos = vm.positionMs.toFloat()
+            val t0 = pos - w / 2f * msPerPx
+
+            // loops
+            vm.loops.forEach { l ->
+                val x0 = (l.start - t0) / msPerPx
+                val x1 = (l.end - t0) / msPerPx
+                if (x1 >= 0f && x0 <= w) {
+                    val c = loopColor(l.id)
+                    val active = vm.activeId == l.id
+                    drawRect(c.copy(alpha = if (active) 0.22f else 0.10f), topLeft = Offset(x0, 0f), size = Size(x1 - x0, h))
+                    drawRect(c, topLeft = Offset(x0, 0f), size = Size(3f, h))
+                    drawRect(c, topLeft = Offset(x1 - 3f, 0f), size = Size(3f, h))
+                    drawText(measurer, l.id.toString(), topLeft = Offset(x0 + 8f, 6f),
+                        style = TextStyle(color = c, fontSize = 14.sp, fontWeight = FontWeight.Bold))
+                }
+            }
+
+            // second ticks
+            val tickEvery = when { windowMs <= 10_000 -> 1000L; windowMs <= 40_000 -> 5000L; else -> 10_000L }
+            var tick = ((t0 / tickEvery).toLong().coerceAtLeast(0)) * tickEvery
+            while (tick <= t0 + windowMs) {
+                val x = (tick - t0) / msPerPx
+                drawRect(Color(0x33FFFFFF), topLeft = Offset(x, h - 10f), size = Size(1.5f, 10f))
+                tick += tickEvery
+            }
+
+            // waveform
+            if (peaks.isNotEmpty()) {
+                val step = 3f
+                var x = 0f
+                while (x < w) {
+                    val a = ((t0 + x * msPerPx) / WaveformLoader.BUCKET_MS).toInt()
+                    val b = ((t0 + (x + step) * msPerPx) / WaveformLoader.BUCKET_MS).toInt().coerceAtLeast(a + 1)
+                    if (b > 0 && a < peaks.size) {
+                        var m = 0f
+                        for (i in a.coerceAtLeast(0) until b.coerceAtMost(peaks.size)) if (peaks[i] > m) m = peaks[i]
+                        val hh = (m * (h * 0.44f)).coerceAtLeast(1f)
+                        val past = x < w / 2f
+                        drawRect(
+                            if (past) waveColor else waveColor.copy(alpha = 0.55f),
+                            topLeft = Offset(x, mid - hh), size = Size(step - 1f, hh * 2f)
+                        )
+                    }
+                    x += step
+                }
+            } else {
+                drawText(measurer, "Drawing waveform…", topLeft = Offset(16f, mid - 20f),
+                    style = TextStyle(color = Color.Gray, fontSize = 13.sp))
+            }
+
+            // playhead
+            drawRect(Color.White, topLeft = Offset(w / 2f - 1.5f, 0f), size = Size(3f, h))
+        }
+        Text(
+            "Drag to scrub · tap to jump · pinch to zoom (${"%.0f".format(windowMs / 1000f)} s shown)",
+            style = MaterialTheme.typography.bodySmall, color = Color.Gray
+        )
     }
 }

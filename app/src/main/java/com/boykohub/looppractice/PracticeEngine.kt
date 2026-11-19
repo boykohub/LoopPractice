@@ -20,6 +20,12 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.RenderersFactory
+import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer
+import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -30,7 +36,17 @@ import org.json.JSONObject
 import kotlin.math.pow
 import kotlin.math.roundToInt
 
-data class Loop(val id: Char, val start: Long, val end: Long)
+/**
+ * A loop. [repeats] = how many times it plays before moving on to [next] (0 = forever).
+ * With no [next], it just keeps looping.
+ */
+data class Loop(
+    val id: Char,
+    val start: Long,
+    val end: Long,
+    val repeats: Int = 0,
+    val next: Char? = null,
+)
 
 /**
  * Lives for the whole app process (owned by [LoopApp]), so loops and the speed trainer
@@ -42,7 +58,17 @@ class PracticeEngine(private val app: Application) {
 
     private val prefs = app.getSharedPreferences("looppractice", Context.MODE_PRIVATE)
 
-    val player: ExoPlayer = ExoPlayer.Builder(app)
+    /** Our own time-stretch (Signalsmith for melody, Rubber Band for drums) instead of Media3's Sonic. */
+    val stretch = StretchProcessor()
+
+    private val renderers = RenderersFactory { handler, _, audioListener, _, _ ->
+        val sink = DefaultAudioSink.Builder(app)
+            .setAudioProcessorChain(StretchChain(stretch))
+            .build()
+        arrayOf<Renderer>(MediaCodecAudioRenderer(app, MediaCodecSelector.DEFAULT, handler, audioListener, sink))
+    }
+
+    val player: ExoPlayer = ExoPlayer.Builder(app, renderers)
         .setHandleAudioBecomingNoisy(true) // pause when headphones are unplugged
         .setWakeMode(C.WAKE_MODE_LOCAL) // keep the CPU awake with the screen off
         .build()
@@ -65,6 +91,16 @@ class PracticeEngine(private val app: Application) {
 
     var speed by mutableFloatStateOf(1f); private set
     var semitones by mutableIntStateOf(0); private set
+
+    /** 0 = Melody (Signalsmith Stretch), 1 = Drums (Rubber Band, crisp transients). */
+    var stretchMode by mutableIntStateOf(StretchProcessor.MODE_MELODY); private set
+
+    /** Waveform peaks: one value (0..1) per [WaveformLoader.BUCKET_MS] ms. Fills in while decoding. */
+    var peaks by mutableStateOf(FloatArray(0)); private set
+    var peaksDone by mutableStateOf(false); private set
+    private var waveJob: Job? = null
+    private var scrubbingUntil = 0L
+    private var lastScrubSeek = 0L
 
     val loops = mutableStateListOf<Loop>()
     var activeId by mutableStateOf<Char?>(null); private set
@@ -125,7 +161,7 @@ class PracticeEngine(private val app: Application) {
     private var saveCounter = 0
 
     private fun tick() {
-        positionMs = player.currentPosition
+        if (android.os.SystemClock.uptimeMillis() > scrubbingUntil) positionMs = player.currentPosition
         if (++saveCounter >= 200) { // about every 2 seconds
             saveCounter = 0
             saveState()
@@ -137,10 +173,22 @@ class PracticeEngine(private val app: Application) {
     }
 
     private fun onLoopWrap(l: Loop) {
-        player.seekTo(l.start)
-        positionMs = l.start
-        if (!player.playWhenReady) player.play()
         reps += 1
+        // Chained loops: after the set number of repeats, move on to the next loop.
+        val nxt = l.next?.let { n -> loops.firstOrNull { it.id == n } }
+        val target = if (nxt != null && l.repeats > 0 && reps >= l.repeats) {
+            activeId = nxt.id
+            selectedId = nxt.id
+            reps = 0
+            nxt
+        } else l
+        // If the next loop starts right where this one ends, just keep playing (no seek, no gap).
+        val contiguous = target !== l && kotlin.math.abs(target.start - l.end) < 40
+        if (!contiguous) {
+            player.seekTo(target.start)
+            positionMs = target.start
+        }
+        if (!player.playWhenReady) player.play()
         if (trainerOn && trainerEvery > 0 && reps % trainerEvery == 0) {
             val max = trainerMaxPct / 100f
             if (speed < max) changeSpeed((speed + trainerStepPct / 100f).coerceAtMost(max))
@@ -172,12 +220,13 @@ class PracticeEngine(private val app: Application) {
         player.setMediaItem(
             MediaItem.Builder()
                 .setUri(u)
-                .setMediaMetadata(MediaMetadata.Builder().setTitle(fileName).setArtist("Loop Practice").build())
+                .setMediaMetadata(MediaMetadata.Builder().setTitle(fileName).setArtist("Music Practice").build())
                 .build()
         )
         player.prepare()
         loadLoops()
         restoreState()
+        loadWaveform(u)
         prefs.edit().putString("lastUri", u.toString()).apply()
     }
 
@@ -205,7 +254,32 @@ class PracticeEngine(private val app: Application) {
         positionMs = t
     }
 
-    fun skip(deltaMs: Long) = seekTo(positionMs + deltaMs)
+    /** Jump back/forward. While a loop is active, stays inside the loop. */
+    fun skip(deltaMs: Long) {
+        val l = activeLoop()
+        var t = positionMs + deltaMs
+        if (l != null && positionMs >= l.start && positionMs <= l.end) {
+            t = t.coerceIn(l.start, maxOf(l.start, l.end - 50))
+        }
+        seekTo(t)
+    }
+
+    /** Dragging the waveform: move the position smoothly, seeking at most ~20 times a second. */
+    fun scrubTo(ms: Long) {
+        val t = ms.coerceIn(0L, maxOf(durationMs, 0L))
+        positionMs = t
+        val now = android.os.SystemClock.uptimeMillis()
+        scrubbingUntil = now + 250
+        if (now - lastScrubSeek > 50) {
+            player.seekTo(t)
+            lastScrubSeek = now
+        }
+    }
+
+    fun endScrub() {
+        player.seekTo(positionMs)
+        scrubbingUntil = android.os.SystemClock.uptimeMillis() + 150
+    }
 
     fun toStart() = seekTo(activeLoop()?.start ?: 0L)
 
@@ -228,8 +302,30 @@ class PracticeEngine(private val app: Application) {
 
     private fun applyParams() {
         val pitch = 2f.pow(semitones / 12f)
-        // Media3 time-stretches with pitch kept, so speed and pitch are independent.
+        // Our StretchProcessor time-stretches with pitch kept, so speed and pitch are independent.
         player.playbackParameters = PlaybackParameters(speed, pitch)
+    }
+
+    fun changeStretchMode(m: Int) {
+        if (m == stretchMode) return
+        stretchMode = m
+        stretch.requestMode(m)
+        // A seek to where we are makes the audio pipeline restart with the new engine.
+        if (uri != null) player.seekTo(player.currentPosition)
+    }
+
+    // ---------- waveform ----------
+
+    private fun loadWaveform(u: Uri) {
+        waveJob?.cancel()
+        peaks = FloatArray(0)
+        peaksDone = false
+        waveJob = scope.launch {
+            WaveformLoader.load(app, u) { arr, done ->
+                peaks = arr
+                peaksDone = done
+            }
+        }
     }
 
     // ---------- loops ----------
@@ -269,6 +365,7 @@ class PracticeEngine(private val app: Application) {
     fun deleteSelected() {
         val id = selectedId ?: return
         loops.removeAll { it.id == id }
+        for (i in loops.indices) if (loops[i].next == id) loops[i] = loops[i].copy(next = null)
         if (activeId == id) activeId = null
         selectedId = loops.firstOrNull()?.id
         saveLoops()
@@ -290,6 +387,14 @@ class PracticeEngine(private val app: Application) {
     fun endNow(id: Char) = update(id) { l ->
         val e = positionMs.coerceIn(0L, durationMs)
         if (e > l.start + 20) l.copy(end = e) else l
+    }
+
+    /** How many times the loop plays before moving to its next loop (0 = forever). */
+    fun setRepeats(id: Char, n: Int) = update(id) { it.copy(repeats = n.coerceIn(0, 99)) }
+
+    /** Which loop comes after this one (null = none, just keep looping). */
+    fun setNext(id: Char, next: Char?) = update(id) { l ->
+        l.copy(next = next, repeats = if (next != null && l.repeats == 0) 1 else l.repeats)
     }
 
     private fun update(id: Char, f: (Loop) -> Loop) {
@@ -323,6 +428,7 @@ class PracticeEngine(private val app: Application) {
             .put("active", activeId?.toString() ?: "")
             .put("sel", selectedId?.toString() ?: "")
             .put("pos", positionMs)
+            .put("mode", stretchMode)
             .toString()
         if (st != lastSavedState) {
             prefs.edit().putString("state:$u", st).apply()
@@ -335,6 +441,7 @@ class PracticeEngine(private val app: Application) {
         val s = prefs.getString("state:$u", null)
         speed = 1f
         semitones = 0
+        var mode = StretchProcessor.MODE_MELODY
         if (s != null) {
             try {
                 val o = JSONObject(s)
@@ -342,6 +449,7 @@ class PracticeEngine(private val app: Application) {
                 semitones = o.optInt("semi", 0).coerceIn(-12, 12)
                 activeId = o.optString("active", "").firstOrNull()?.takeIf { c -> loops.any { it.id == c } }
                 o.optString("sel", "").firstOrNull()?.takeIf { c -> loops.any { it.id == c } }?.let { selectedId = it }
+                mode = o.optInt("mode", StretchProcessor.MODE_MELODY)
                 val pos = o.optLong("pos", 0L).coerceAtLeast(0L)
                 player.seekTo(pos)
                 positionMs = pos
@@ -349,6 +457,8 @@ class PracticeEngine(private val app: Application) {
             }
         }
         lastSavedState = ""
+        stretchMode = mode
+        stretch.requestMode(mode)
         applyParams()
     }
 
@@ -371,7 +481,10 @@ class PracticeEngine(private val app: Application) {
         if (uri == null) return
         val arr = JSONArray()
         loops.forEach { l ->
-            arr.put(JSONObject().put("id", l.id.toString()).put("s", l.start).put("e", l.end))
+            arr.put(
+                JSONObject().put("id", l.id.toString()).put("s", l.start).put("e", l.end)
+                    .put("r", l.repeats).put("n", l.next?.toString() ?: "")
+            )
         }
         prefs.edit().putString(loopsKey(), arr.toString()).apply()
     }
@@ -383,7 +496,12 @@ class PracticeEngine(private val app: Application) {
             val arr = JSONArray(s)
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
-                loops.add(Loop(o.getString("id")[0], o.getLong("s"), o.getLong("e")))
+                loops.add(
+                    Loop(
+                        o.getString("id")[0], o.getLong("s"), o.getLong("e"),
+                        o.optInt("r", 0), o.optString("n", "").firstOrNull()
+                    )
+                )
             }
             selectedId = loops.firstOrNull()?.id
         } catch (_: Exception) {
