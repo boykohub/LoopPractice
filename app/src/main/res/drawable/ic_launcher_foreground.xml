@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- loop ring with a gap and arrow head -->
+    <path
+        android:pathData="M54,30 A24,24 0 1,1 31,47"
+        android:strokeColor="#FF7FD1FF"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+    <path
+        android:pathData="M25,44 L32,52 L38,43 Z"
+        android:fillColor="#FF7FD1FF" />
+    <!-- play triangle -->
+    <path
+        android:pathData="M47,42 L67,54 L47,66 Z"
+        android:fillColor="#FFFFC15E" />
+</vector>
