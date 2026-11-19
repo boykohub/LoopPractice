@@ -6,7 +6,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.viewModels
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
@@ -14,7 +13,7 @@ import androidx.compose.ui.graphics.Color
 
 class MainActivity : ComponentActivity() {
 
-    private val vm: PlayerViewModel by viewModels()
+    private val vm: PracticeEngine get() = (application as LoopApp).engine
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -37,6 +36,15 @@ class MainActivity : ComponentActivity() {
                     PlayerScreen(vm, onOpen = { picker.launch(arrayOf("audio/*", "video/*")) })
                 }
             }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Starts the background-playback service (allowed here because the app is in front).
+        try {
+            startService(Intent(this, PlaybackService::class.java))
+        } catch (_: Exception) {
         }
     }
 

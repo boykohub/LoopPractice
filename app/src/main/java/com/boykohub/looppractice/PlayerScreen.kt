@@ -69,7 +69,7 @@ fun fmt(ms: Long): String {
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
-fun PlayerScreen(vm: PlayerViewModel, onOpen: () -> Unit) {
+fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
     // Keep the screen awake while you practise.
     val view = LocalView.current
     DisposableEffect(vm.isPlaying) {
@@ -293,7 +293,7 @@ fun Stepper(label: String, value: String, onDec: () -> Unit, onInc: () -> Unit) 
 
 /** Track bar: loop regions in colour, playhead in white. Tap or drag to seek. */
 @Composable
-fun Timeline(vm: PlayerViewModel) {
+fun Timeline(vm: PracticeEngine) {
     val measurer = rememberTextMeasurer()
     val dur = vm.durationMs
     Canvas(

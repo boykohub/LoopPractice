@@ -12,15 +12,17 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.viewModelScope
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -30,12 +32,19 @@ import kotlin.math.roundToInt
 
 data class Loop(val id: Char, val start: Long, val end: Long)
 
-class PlayerViewModel(app: Application) : AndroidViewModel(app) {
+/**
+ * Lives for the whole app process (owned by [LoopApp]), so loops and the speed trainer
+ * keep working while the screen is off or the app is in the background.
+ */
+class PracticeEngine(private val app: Application) {
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private val prefs = app.getSharedPreferences("looppractice", Context.MODE_PRIVATE)
 
     val player: ExoPlayer = ExoPlayer.Builder(app)
         .setHandleAudioBecomingNoisy(true) // pause when headphones are unplugged
+        .setWakeMode(C.WAKE_MODE_LOCAL) // keep the CPU awake with the screen off
         .build()
         .apply {
             setAudioAttributes(
@@ -95,7 +104,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
             }
         })
 
-        viewModelScope.launch {
+        scope.launch {
             while (true) {
                 tick()
                 delay(10)
@@ -135,7 +144,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
     // ---------- file ----------
 
     fun load(u: Uri, takePermission: Boolean = true) {
-        val ctx = getApplication<Application>()
+        val ctx = app
         if (takePermission) {
             try {
                 ctx.contentResolver.takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -150,7 +159,12 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         activeId = null
         selectedId = null
         reps = 0
-        player.setMediaItem(MediaItem.fromUri(u))
+        player.setMediaItem(
+            MediaItem.Builder()
+                .setUri(u)
+                .setMediaMetadata(MediaMetadata.Builder().setTitle(fileName).setArtist("Loop Practice").build())
+                .build()
+        )
         player.prepare()
         applyParams()
         loadLoops()
@@ -159,7 +173,7 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun queryName(u: Uri): String {
         return try {
-            getApplication<Application>().contentResolver
+            app.contentResolver
                 .query(u, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
                 ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
         } catch (_: Exception) {
@@ -300,8 +314,22 @@ class PlayerViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    override fun onCleared() {
-        player.release()
-        super.onCleared()
+    /** Headphone / lock-screen "next": go to the next loop (or the first one). */
+    fun nextLoop() {
+        if (loops.isEmpty()) { skip(10_000); return }
+        val i = loops.indexOfFirst { it.id == activeId }
+        activate(loops[(i + 1).mod(loops.size)].id)
+    }
+
+    /** Headphone / lock-screen "previous": restart the loop, or go back one loop if near its start. */
+    fun prevLoop() {
+        val cur = activeLoop()
+        if (cur == null) {
+            if (loops.isEmpty()) toStart() else activate(loops.last().id)
+            return
+        }
+        if (positionMs - cur.start > 1500) { seekTo(cur.start); return }
+        val i = loops.indexOfFirst { it.id == activeId }
+        activate(loops[(i - 1).mod(loops.size)].id)
     }
 }
