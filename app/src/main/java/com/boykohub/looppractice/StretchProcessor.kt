@@ -63,7 +63,8 @@ class StretchProcessor : AudioProcessor {
     }
 
     /** Speed currently applied to the audio (1 when bypassed). */
-    fun effectiveSpeed(): Float = if (isActive()) pendingSpeed else 1f
+    @Volatile private var appliedSpeed = 1f
+    fun effectiveSpeed(): Float = appliedSpeed
 
     override fun configure(inputAudioFormat: AudioFormat): AudioFormat {
         if (inputAudioFormat.encoding != C.ENCODING_PCM_16BIT) {
@@ -128,6 +129,9 @@ class StretchProcessor : AudioProcessor {
             format = f
             NativeStretch.nSetParams(handle, pendingSpeed, pendingPitch)
             NativeStretch.nReset(handle)
+            appliedSpeed = pendingSpeed
+        } else {
+            appliedSpeed = 1f
         }
         inputEnded = false
     }
@@ -138,6 +142,7 @@ class StretchProcessor : AudioProcessor {
         mode = -1
         pendingFormat = AudioFormat.NOT_SET
         format = AudioFormat.NOT_SET
+        appliedSpeed = 1f
         inputEnded = false
     }
 }

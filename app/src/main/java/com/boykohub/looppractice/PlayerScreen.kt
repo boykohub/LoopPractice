@@ -2,6 +2,16 @@ package com.boykohub.looppractice
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.style.TextAlign
+import kotlinx.coroutines.delay
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -74,6 +84,19 @@ fun fmt(ms: Long): String {
     return "%d:%02d.%02d".format(m, s, cs)
 }
 
+fun fmtMs(ms: Long): String {
+    val t = ms.coerceAtLeast(0)
+    return "%d:%02d.%03d".format(t / 60_000, (t / 1000) % 60, t % 1000)
+}
+
+/** Draw a small label only where it fits (drawText throws if it starts outside the canvas). */
+fun androidx.compose.ui.graphics.drawscope.DrawScope.safeLabel(
+    measurer: androidx.compose.ui.text.TextMeasurer, text: String, x: Float, y: Float, style: TextStyle
+) {
+    if (x < 0f || y < 0f || x > size.width - 30f || y > size.height - 30f) return
+    drawText(measurer, text, topLeft = Offset(x, y), style = style)
+}
+
 @OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 @Composable
 fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
@@ -88,12 +111,10 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
         Modifier
             .fillMaxSize()
             .safeDrawingPadding()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+            .padding(horizontal = 16.dp)
     ) {
         // ---------- header ----------
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(top = 8.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Music Practice", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                 Text(
@@ -105,6 +126,7 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
             FilledTonalButton(onClick = onOpen) { Text("Open") }
         }
 
+        vm.crashReport?.let { CrashCard(it) { vm.dismissCrash() } }
         vm.error?.let { Text(it, color = Color(0xFFFF8FA3)) }
 
         if (vm.uri == null) {
@@ -112,34 +134,23 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
             Button(onClick = onOpen, modifier = Modifier.fillMaxWidth().height(64.dp)) {
                 Text("Open an audio file", fontSize = 18.sp)
             }
+            Spacer(Modifier.height(8.dp))
             Text(
-                "MP3, WAV, FLAC, M4A/AAC, OGG, Opus, and the audio from video files. " +
-                    "You can also pick \"Music Practice\" when opening a file from Files or Drive.",
+                "MP3, WAV, FLAC, M4A/AAC, OGG, Opus and video files. " +
+                    "You can also use Share → Music Practice from other apps.",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color.Gray
             )
             return@Column
         }
 
-        // ---------- video (only for video files) ----------
-        if (vm.hasVideo) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Show video", modifier = Modifier.weight(1f))
-                Switch(checked = vm.videoOn, onCheckedChange = { vm.changeVideoOn(it) })
-            }
-            if (vm.videoOn) VideoBox(vm)
-        }
-
-        // ---------- waveform ----------
+        // ---------- pinned: waveform, time and transport stay visible ----------
         ScrollingWaveform(vm)
-        Timeline(vm)
-        Row {
+        Row(Modifier.padding(top = 4.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(fmt(vm.positionMs), fontFamily = FontFamily.Monospace, fontSize = 20.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.weight(1f))
             Text(fmt(vm.durationMs), fontFamily = FontFamily.Monospace, color = Color.Gray)
         }
-
-        // ---------- transport ----------
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             SmallKey("|◀", Modifier.weight(1f)) { vm.toStart() }
             SmallKey("−5", Modifier.weight(1f)) { vm.skip(-5000) }
@@ -152,207 +163,265 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
             SmallKey("+1", Modifier.weight(1f)) { vm.skip(1000) }
             SmallKey("+5", Modifier.weight(1f)) { vm.skip(5000) }
         }
-        Text(
-            "−1 / +1 and −5 / +5 jump in seconds. While a loop is playing they stay inside the loop.",
-            style = MaterialTheme.typography.bodySmall, color = Color.Gray
-        )
+        Spacer(Modifier.height(8.dp))
 
-        // ---------- loops ----------
-        Section("Loops") {
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+        // ---------- everything else scrolls ----------
+        Column(
+            Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Timeline(vm)
+
+            if (vm.hasVideo) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Show video", modifier = Modifier.weight(1f))
+                    Switch(checked = vm.videoOn, onCheckedChange = { vm.changeVideoOn(it) })
+                }
+                if (vm.videoOn) VideoBox(vm)
+            }
+
+            // ---------- loops ----------
+            Section(
+                "Loops" + when {
+                    vm.awaitingEndId != null -> "  · tap ${vm.awaitingEndId} to set its end"
+                    vm.activeId != null -> "  · ${vm.activeId} ×${vm.reps}"
+                    else -> ""
+                },
+                trailing = { if (vm.activeId != null) TextButton(onClick = { vm.loopOff() }) { Text("Loop off") } }
             ) {
-                vm.loops.forEach { l ->
-                    val c = loopColor(l.id)
-                    val active = vm.activeId == l.id
-                    val selected = vm.selectedId == l.id
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    vm.loops.forEach { l ->
+                        val c = loopColor(l.id)
+                        val active = vm.activeId == l.id
+                        val selected = vm.selectedId == l.id
+                        val awaiting = vm.awaitingEndId == l.id
+                        Box(
+                            Modifier
+                                .size(width = 72.dp, height = 56.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (active) c else c.copy(alpha = if (awaiting) 0.35f else 0.18f))
+                                .combinedClickable(
+                                    onClick = { vm.tapLoop(l.id) },
+                                    onLongClick = { vm.select(l.id) }
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (awaiting) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(l.id.toString(), fontSize = 20.sp, fontWeight = FontWeight.Black, color = c)
+                                    Text("tap = end", fontSize = 10.sp, color = c)
+                                }
+                            } else {
+                                Text(
+                                    (if (active) "↻" else "") + l.id + (l.next?.let { "→$it" } ?: ""),
+                                    fontSize = if (l.next != null) 17.sp else 22.sp,
+                                    fontWeight = if (selected) FontWeight.Black else FontWeight.Medium,
+                                    color = if (active) Color.Black else c
+                                )
+                            }
+                        }
+                    }
                     Box(
                         Modifier
-                            .size(width = 72.dp, height = 56.dp)
+                            .size(width = 64.dp, height = 56.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .background(if (active) c else c.copy(alpha = 0.18f))
-                            .combinedClickable(
-                                onClick = { vm.activate(l.id) },
-                                onLongClick = { vm.select(l.id) }
-                            ),
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .combinedClickable(onClick = { vm.addLoop() }),
                         contentAlignment = Alignment.Center
+                    ) { Text("+", fontSize = 26.sp) }
+                }
+            }
+
+            // ---------- loop editor ----------
+            vm.selectedLoop()?.let { l ->
+                val shownEnd = vm.displayEnd(l)
+                Section(
+                    "Loop ${l.id}  · ${fmt(shownEnd - l.start)}",
+                    accent = loopColor(l.id),
+                    trailing = { TextButton(onClick = { vm.deleteSelected() }) { Text("Delete", color = Color(0xFFFF8FA3)) } }
+                ) {
+                    PointEditor("Start", l.start, vm.nudgeStep, { vm.setStart(l.id, it) }, { vm.startNow(l.id) })
+                    PointEditor("End", shownEnd, vm.nudgeStep, { vm.setEnd(l.id, it) }, { vm.endNow(l.id) })
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Step", style = MaterialTheme.typography.bodySmall, color = Color.Gray, modifier = Modifier.width(36.dp))
+                        listOf(1L to "1ms", 10L to "10ms", 100L to "0.1s", 1000L to "1s").forEach { (v, t) ->
+                            if (vm.nudgeStep == v) Button(onClick = { vm.nudgeStep = v }, contentPadding = ButtonDefaults.TextButtonContentPadding) { Text(t) }
+                            else OutlinedButton(onClick = { vm.nudgeStep = v }, contentPadding = ButtonDefaults.TextButtonContentPadding) { Text(t) }
+                        }
+                    }
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Text(
-                            (if (active) "↻" else "") + l.id + (l.next?.let { "→$it" } ?: ""),
-                            fontSize = if (l.next != null) 17.sp else 22.sp,
-                            fontWeight = if (selected) FontWeight.Black else FontWeight.Medium,
-                            color = if (active) Color.Black else c
+                            "Then", style = MaterialTheme.typography.bodySmall, color = Color.Gray,
+                            modifier = Modifier.align(Alignment.CenterVertically).width(36.dp)
+                        )
+                        if (l.next == null) Button(onClick = {}, contentPadding = ButtonDefaults.TextButtonContentPadding) { Text("Keep looping") }
+                        else OutlinedButton(onClick = { vm.setNext(l.id, null) }, contentPadding = ButtonDefaults.TextButtonContentPadding) { Text("Keep looping") }
+                        vm.loops.filter { it.id != l.id }.forEach { o ->
+                            if (l.next == o.id) Button(
+                                onClick = {},
+                                colors = ButtonDefaults.buttonColors(containerColor = loopColor(o.id), contentColor = Color.Black),
+                                contentPadding = ButtonDefaults.TextButtonContentPadding
+                            ) { Text("→ ${o.id}") }
+                            else OutlinedButton(onClick = { vm.setNext(l.id, o.id) }, contentPadding = ButtonDefaults.TextButtonContentPadding) {
+                                Text("→ ${o.id}", color = loopColor(o.id))
+                            }
+                        }
+                    }
+                    if (l.next != null) {
+                        Stepper(
+                            "Plays", "${l.repeats}× → ${l.next}",
+                            { vm.setRepeats(l.id, (l.repeats - 1).coerceAtLeast(1)) },
+                            { vm.setRepeats(l.id, l.repeats + 1) }
                         )
                     }
                 }
-                Box(
-                    Modifier
-                        .size(width = 64.dp, height = 56.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant)
-                        .combinedClickable(onClick = { vm.addLoop() }),
-                    contentAlignment = Alignment.Center
-                ) { Text("+", fontSize = 26.sp) }
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    if (vm.activeId != null) "Looping ${vm.activeId} · ${vm.reps} reps" else "Loop off — tap a letter to loop it",
-                    style = MaterialTheme.typography.bodySmall, color = Color.Gray,
-                    modifier = Modifier.weight(1f)
-                )
-                if (vm.activeId != null) TextButton(onClick = { vm.loopOff() }) { Text("Loop off") }
-            }
-            Text("Long-press a letter to edit it without jumping.", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-        }
 
-        // ---------- loop editor ----------
-        vm.selectedLoop()?.let { l ->
-            Section("Edit loop ${l.id}", accent = loopColor(l.id)) {
-                PointEditor(
-                    label = "Start", ms = l.start, step = vm.nudgeStep,
-                    onSet = { vm.setStart(l.id, it) }, onNow = { vm.startNow(l.id) }
-                )
-                PointEditor(
-                    label = "End", ms = l.end, step = vm.nudgeStep,
-                    onSet = { vm.setEnd(l.id, it) }, onNow = { vm.endNow(l.id) }
-                )
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Nudge", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-                    listOf(10L to "0.01s", 100L to "0.1s", 1000L to "1s").forEach { (v, t) ->
-                        val on = vm.nudgeStep == v
-                        if (on) Button(onClick = { vm.nudgeStep = v }, contentPadding = ButtonDefaults.TextButtonContentPadding) { Text(t) }
-                        else OutlinedButton(onClick = { vm.nudgeStep = v }, contentPadding = ButtonDefaults.TextButtonContentPadding) { Text(t) }
-                    }
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = { vm.deleteSelected() }) { Text("Delete", color = Color(0xFFFF8FA3)) }
+            // ---------- speed ----------
+            Section("Speed  ${(vm.speed * 100).toInt()}%" + (vm.activeId?.let { "  · loop $it" } ?: "  · song")) {
+                Slider(value = vm.speed, onValueChange = { vm.changeSpeed(it) }, valueRange = 0.25f..2f)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { vm.changeSpeed(vm.speed - 0.05f) }, modifier = Modifier.weight(1f)) { Text("−5%") }
+                    OutlinedButton(onClick = { vm.changeSpeed(vm.speed - 0.01f) }, modifier = Modifier.weight(1f)) { Text("−1%") }
+                    OutlinedButton(onClick = { vm.changeSpeed(vm.speed + 0.01f) }, modifier = Modifier.weight(1f)) { Text("+1%") }
+                    OutlinedButton(onClick = { vm.changeSpeed(vm.speed + 0.05f) }, modifier = Modifier.weight(1f)) { Text("+5%") }
                 }
-                Text("Length ${fmt(l.end - l.start)}", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
-
-                // ---- chaining ----
-                Text("Then play", style = MaterialTheme.typography.bodyMedium)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    val none = l.next == null
-                    if (none) Button(onClick = {}, contentPadding = ButtonDefaults.TextButtonContentPadding) { Text("Keep looping") }
-                    else OutlinedButton(onClick = { vm.setNext(l.id, null) }, contentPadding = ButtonDefaults.TextButtonContentPadding) { Text("Keep looping") }
-                    vm.loops.filter { it.id != l.id }.forEach { o ->
-                        val on = l.next == o.id
-                        if (on) Button(
-                            onClick = {},
-                            colors = ButtonDefaults.buttonColors(containerColor = loopColor(o.id), contentColor = Color.Black),
-                            contentPadding = ButtonDefaults.TextButtonContentPadding
-                        ) { Text("→ ${o.id}") }
-                        else OutlinedButton(onClick = { vm.setNext(l.id, o.id) }, contentPadding = ButtonDefaults.TextButtonContentPadding) {
-                            Text("→ ${o.id}", color = loopColor(o.id))
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(50, 60, 70, 75, 80, 90, 100, 125).forEach { p ->
+                        TextButton(onClick = { vm.changeSpeed(p / 100f) }) {
+                            Text("$p%", color = if ((vm.speed * 100).toInt() == p) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary)
                         }
                     }
                 }
-                if (l.next != null) {
-                    Stepper(
-                        "Plays", "${l.repeats}×",
-                        { vm.setRepeats(l.id, (l.repeats - 1).coerceAtLeast(1)) },
-                        { vm.setRepeats(l.id, l.repeats + 1) }
-                    )
-                    Text(
-                        "Loop ${l.id} plays ${l.repeats}× then goes to ${l.next}. Set ${l.next} to go somewhere else for a longer chain.",
-                        style = MaterialTheme.typography.bodySmall, color = Color.Gray
-                    )
-                }
             }
-        }
 
-        // ---------- speed ----------
-        Section("Speed  ${(vm.speed * 100).toInt()}%" + (vm.activeId?.let { "  · loop $it" } ?: "")) {
-            Slider(value = vm.speed, onValueChange = { vm.changeSpeed(it) }, valueRange = 0.25f..2f)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { vm.changeSpeed(vm.speed - 0.05f) }, modifier = Modifier.weight(1f)) { Text("−5%") }
-                OutlinedButton(onClick = { vm.changeSpeed(vm.speed - 0.01f) }, modifier = Modifier.weight(1f)) { Text("−1%") }
-                OutlinedButton(onClick = { vm.changeSpeed(vm.speed + 0.01f) }, modifier = Modifier.weight(1f)) { Text("+1%") }
-                OutlinedButton(onClick = { vm.changeSpeed(vm.speed + 0.05f) }, modifier = Modifier.weight(1f)) { Text("+5%") }
-            }
-            Text(
-                if (vm.activeId != null) "Each loop remembers its own speed." else "Speed for the whole song (loops keep their own).",
-                style = MaterialTheme.typography.bodySmall, color = Color.Gray
-            )
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf(50, 60, 70, 75, 80, 90, 100, 125).forEach { p ->
-                    TextButton(onClick = { vm.changeSpeed(p / 100f) }) {
-                        Text("$p%", color = if ((vm.speed * 100).toInt() == p) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary)
+            // ---------- stretch algorithm ----------
+            Section("Stretch sound") {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(StretchProcessor.MODE_MELODY to "Melody", StretchProcessor.MODE_DRUMS to "Drums").forEach { (m, t) ->
+                        if (vm.stretchMode == m) Button(onClick = {}, modifier = Modifier.weight(1f)) { Text(t) }
+                        else OutlinedButton(onClick = { vm.changeStretchMode(m) }, modifier = Modifier.weight(1f)) { Text(t) }
                     }
                 }
             }
-        }
 
-        // ---------- stretch algorithm ----------
-        Section("Stretch sound") {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(StretchProcessor.MODE_MELODY to "Melody", StretchProcessor.MODE_DRUMS to "Drums").forEach { (m, t) ->
-                    if (vm.stretchMode == m) Button(onClick = {}, modifier = Modifier.weight(1f)) { Text(t) }
-                    else OutlinedButton(onClick = { vm.changeStretchMode(m) }, modifier = Modifier.weight(1f)) { Text(t) }
+            // ---------- pitch ----------
+            Section("Pitch  " + (if (vm.semitones > 0) "+" else "") + "${vm.semitones} semitones") {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { vm.changeSemitones(-1) }, modifier = Modifier.weight(1f)) { Text("− ½ step") }
+                    OutlinedButton(onClick = { vm.resetPitch() }, modifier = Modifier.weight(1f)) { Text("Reset") }
+                    OutlinedButton(onClick = { vm.changeSemitones(1) }, modifier = Modifier.weight(1f)) { Text("+ ½ step") }
                 }
             }
-            Text(
-                if (vm.stretchMode == StretchProcessor.MODE_MELODY)
-                    "Signalsmith Stretch: smooth and natural for melodies, chords and vocals."
-                else
-                    "Rubber Band (crisp transients): keeps drum hits and attacks sharp.",
-                style = MaterialTheme.typography.bodySmall, color = Color.Gray
-            )
-        }
 
-        // ---------- pitch ----------
-        Section("Pitch  " + (if (vm.semitones > 0) "+" else "") + "${vm.semitones} semitones") {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { vm.changeSemitones(-1) }, modifier = Modifier.weight(1f)) { Text("− ½ step") }
-                OutlinedButton(onClick = { vm.resetPitch() }, modifier = Modifier.weight(1f)) { Text("Reset") }
-                OutlinedButton(onClick = { vm.changeSemitones(1) }, modifier = Modifier.weight(1f)) { Text("+ ½ step") }
+            // ---------- speed trainer ----------
+            Section(
+                "Speed trainer",
+                trailing = { Switch(checked = vm.trainerOn, onCheckedChange = { vm.trainerOn = it }) }
+            ) {
+                if (vm.trainerOn) {
+                    Stepper("Add", "${vm.trainerStepPct}%", { vm.trainerStepPct = (vm.trainerStepPct - 1).coerceAtLeast(1) }, { vm.trainerStepPct = (vm.trainerStepPct + 1).coerceAtMost(25) })
+                    Stepper("Every", "${vm.trainerEvery} reps", { vm.trainerEvery = (vm.trainerEvery - 1).coerceAtLeast(1) }, { vm.trainerEvery = (vm.trainerEvery + 1).coerceAtMost(20) })
+                    Stepper("Up to", "${vm.trainerMaxPct}%", { vm.trainerMaxPct = (vm.trainerMaxPct - 5).coerceAtLeast(30) }, { vm.trainerMaxPct = (vm.trainerMaxPct + 5).coerceAtMost(200) })
+                } else {
+                    Text("Speeds up a loop a little every few repeats.", style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                }
             }
+            Spacer(Modifier.height(16.dp))
         }
-
-        // ---------- speed trainer ----------
-        Section("Speed trainer") {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "Speeds up automatically while a loop repeats",
-                    style = MaterialTheme.typography.bodySmall, color = Color.Gray,
-                    modifier = Modifier.weight(1f)
-                )
-                Switch(checked = vm.trainerOn, onCheckedChange = { vm.trainerOn = it })
-            }
-            if (vm.trainerOn) {
-                Stepper("Add", "${vm.trainerStepPct}%", { vm.trainerStepPct = (vm.trainerStepPct - 1).coerceAtLeast(1) }, { vm.trainerStepPct = (vm.trainerStepPct + 1).coerceAtMost(25) })
-                Stepper("Every", "${vm.trainerEvery} reps", { vm.trainerEvery = (vm.trainerEvery - 1).coerceAtLeast(1) }, { vm.trainerEvery = (vm.trainerEvery + 1).coerceAtMost(20) })
-                Stepper("Up to", "${vm.trainerMaxPct}%", { vm.trainerMaxPct = (vm.trainerMaxPct - 5).coerceAtLeast(30) }, { vm.trainerMaxPct = (vm.trainerMaxPct + 5).coerceAtMost(200) })
-            }
-        }
-        Spacer(Modifier.height(24.dp))
     }
 }
 
 @Composable
-fun Section(title: String, accent: Color = MaterialTheme.colorScheme.primary, content: @Composable () -> Unit) {
+fun Section(
+    title: String,
+    accent: Color = MaterialTheme.colorScheme.primary,
+    trailing: (@Composable () -> Unit)? = null,
+    content: @Composable () -> Unit
+) {
     Column(
         Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        Text(title, style = MaterialTheme.typography.titleSmall, color = accent, fontWeight = FontWeight.Bold)
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.heightIn(min = 24.dp)) {
+            Text(
+                title, style = MaterialTheme.typography.titleSmall, color = accent, fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis
+            )
+            trailing?.invoke()
+        }
         content()
+    }
+}
+
+/** − / + button that keeps stepping while you hold it. */
+@Composable
+fun RepeatButton(label: String, onStep: () -> Unit) {
+    val src = remember { MutableInteractionSource() }
+    val pressed by src.collectIsPressedAsState()
+    val step by rememberUpdatedState(onStep)
+    LaunchedEffect(pressed) {
+        if (pressed) {
+            step()
+            delay(400)
+            while (true) {
+                step()
+                delay(60)
+            }
+        }
+    }
+    OutlinedButton(onClick = {}, interactionSource = src, contentPadding = ButtonDefaults.TextButtonContentPadding) {
+        Text(label, fontSize = 18.sp)
     }
 }
 
 @Composable
 fun PointEditor(label: String, ms: Long, step: Long, onSet: (Long) -> Unit, onNow: () -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(label, modifier = Modifier.width(44.dp))
-        OutlinedButton(onClick = { onSet(ms - step) }, contentPadding = ButtonDefaults.TextButtonContentPadding) { Text("−") }
-        Text(fmt(ms), fontFamily = FontFamily.Monospace, fontSize = 17.sp, modifier = Modifier.width(92.dp))
-        OutlinedButton(onClick = { onSet(ms + step) }, contentPadding = ButtonDefaults.TextButtonContentPadding) { Text("+") }
-        Spacer(Modifier.weight(1f))
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(36.dp))
+        RepeatButton("−") { onSet(ms - step) }
+        Text(
+            fmtMs(ms), fontFamily = FontFamily.Monospace, fontSize = 16.sp,
+            textAlign = TextAlign.Center, modifier = Modifier.weight(1f)
+        )
+        RepeatButton("+") { onSet(ms + step) }
         FilledTonalButton(onClick = onNow, contentPadding = ButtonDefaults.TextButtonContentPadding) { Text("Now") }
+    }
+}
+
+@Composable
+fun CrashCard(report: String, onDismiss: () -> Unit) {
+    val clipboard = LocalClipboardManager.current
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(bottom = 8.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF3A1E24))
+            .padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Text("The app crashed last time", fontWeight = FontWeight.Bold, color = Color(0xFFFF8FA3))
+        Text(
+            report, fontFamily = FontFamily.Monospace, fontSize = 10.sp, color = Color.LightGray,
+            maxLines = 6, overflow = TextOverflow.Ellipsis
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilledTonalButton(onClick = { clipboard.setText(AnnotatedString(report)) }) { Text("Copy details") }
+            TextButton(onClick = onDismiss) { Text("Close") }
+        }
     }
 }
 
@@ -374,7 +443,7 @@ fun Timeline(vm: PracticeEngine) {
     Canvas(
         Modifier
             .fillMaxWidth()
-            .height(84.dp)
+            .height(60.dp)
             .pointerInput(dur) {
                 detectTapGestures { o ->
                     if (dur > 0) vm.seekTo((o.x / size.width * dur).toLong())
@@ -406,10 +475,10 @@ fun Timeline(vm: PracticeEngine) {
                 x += step
             }
         }
-        val laneH = 22f * density / 2.5f + 18f
+        val laneH = h * 0.42f
         vm.loops.forEachIndexed { i, l ->
             val x0 = l.start.toFloat() / dur * w
-            val x1 = l.end.toFloat() / dur * w
+            val x1 = vm.displayEnd(l).toFloat() / dur * w
             val c = loopColor(l.id)
             val active = vm.activeId == l.id
             drawRect(
@@ -419,12 +488,8 @@ fun Timeline(vm: PracticeEngine) {
             )
             drawRect(c, topLeft = Offset(x0, 0f), size = Size(3f, h))
             drawRect(c, topLeft = Offset(x1 - 3f, 0f), size = Size(3f, h))
-            val y = 6f + (i % 2) * laneH
-            drawText(
-                measurer, l.id.toString(),
-                topLeft = Offset(x0 + 8f, y),
-                style = TextStyle(color = c, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            )
+            val y = 4f + (i % 2) * laneH
+            safeLabel(measurer, l.id.toString(), x0 + 6f, y, TextStyle(color = c, fontSize = 12.sp, fontWeight = FontWeight.Bold))
         }
         val px = vm.positionMs.toFloat() / dur * w
         drawRect(Color.White, topLeft = Offset(px - 2f, 0f), size = Size(4f, h))
@@ -499,15 +564,18 @@ fun ScrollingWaveform(vm: PracticeEngine) {
             // loops
             vm.loops.forEach { l ->
                 val x0 = (l.start - t0) / msPerPx
-                val x1 = (l.end - t0) / msPerPx
+                val x1 = (vm.displayEnd(l) - t0) / msPerPx
                 if (x1 >= 0f && x0 <= w) {
                     val c = loopColor(l.id)
                     val active = vm.activeId == l.id
-                    drawRect(c.copy(alpha = if (active) 0.22f else 0.10f), topLeft = Offset(x0, 0f), size = Size(x1 - x0, h))
+                    val rx0 = x0.coerceAtLeast(-4f)
+                    val rx1 = x1.coerceAtMost(w + 4f)
+                    drawRect(c.copy(alpha = if (active) 0.22f else 0.10f), topLeft = Offset(rx0, 0f), size = Size((rx1 - rx0).coerceAtLeast(1f), h))
                     drawRect(c, topLeft = Offset(x0, 0f), size = Size(3f, h))
                     drawRect(c, topLeft = Offset(x1 - 3f, 0f), size = Size(3f, h))
-                    drawText(measurer, l.id.toString(), topLeft = Offset(x0 + 8f, 6f),
-                        style = TextStyle(color = c, fontSize = 14.sp, fontWeight = FontWeight.Bold))
+                    // Keep the letter visible even when the loop started off-screen to the left.
+                    safeLabel(measurer, l.id.toString(), x0.coerceAtLeast(0f) + 8f, 6f,
+                        TextStyle(color = c, fontSize = 14.sp, fontWeight = FontWeight.Bold))
                 }
             }
 
@@ -540,17 +608,15 @@ fun ScrollingWaveform(vm: PracticeEngine) {
                     x += step
                 }
             } else {
-                drawText(measurer, "Drawing waveform…", topLeft = Offset(16f, mid - 20f),
-                    style = TextStyle(color = Color.Gray, fontSize = 13.sp))
+                safeLabel(measurer, "Drawing waveform…", 16f, mid - 20f, TextStyle(color = Color.Gray, fontSize = 13.sp))
             }
 
             // playhead
             drawRect(Color.White, topLeft = Offset(w / 2f - 1.5f, 0f), size = Size(3f, h))
+            // zoom indicator
+            safeLabel(measurer, "${"%.0f".format(windowMs / 1000f)} s", w - 70f, h - 40f,
+                TextStyle(color = Color(0x88FFFFFF), fontSize = 11.sp))
         }
-        Text(
-            "Drag to scrub · tap to jump · pinch to zoom (${"%.0f".format(windowMs / 1000f)} s shown)",
-            style = MaterialTheme.typography.bodySmall, color = Color.Gray
-        )
     }
 }
 

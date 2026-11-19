@@ -124,6 +124,10 @@ class PracticeEngine(private val app: Application) {
     val loops = mutableStateListOf<Loop>()
     var activeId by mutableStateOf<Char?>(null); private set
     var selectedId by mutableStateOf<Char?>(null); private set
+    /** A loop just made with "+": its end is set by tapping its letter. */
+    var awaitingEndId by mutableStateOf<Char?>(null); private set
+    /** Details of a crash from the last run, shown once with a Copy button. */
+    var crashReport by mutableStateOf<String?>(null); private set
     var reps by mutableIntStateOf(0); private set
 
     // Speed trainer: raise the speed a little every N loop repeats.
@@ -178,6 +182,7 @@ class PracticeEngine(private val app: Application) {
         }
 
         restoreGlobal()
+        loadCrashReport()
 
         // Re-open the last file, if we still have permission to read it.
         prefs.getString("lastUri", null)?.let { s ->
@@ -246,6 +251,7 @@ class PracticeEngine(private val app: Application) {
         durationMs = 0L
         activeId = null
         selectedId = null
+        awaitingEndId = null
         reps = 0
         player.setMediaItem(
             MediaItem.Builder()
@@ -365,17 +371,47 @@ class PracticeEngine(private val app: Application) {
     fun addLoop() {
         if (durationMs <= 0) return
         val id = ('A'..'Z').firstOrNull { c -> loops.none { it.id == c } } ?: return
+        finishAwaiting()
         val start = positionMs.coerceIn(0, durationMs)
-        var end = (start + 8_000).coerceAtMost(durationMs)
-        if (end - start < 200) end = durationMs
-        loops.add(Loop(id, start, end, speed = speed))
+        // End is set by tapping the new letter; until then it runs to the end of the song.
+        loops.add(Loop(id, start, durationMs, speed = speed))
         loops.sortBy { it.id }
+        // Let playback run on past any active loop so you can reach the end point.
+        activeId = null
+        reps = 0
         selectedId = id
+        awaitingEndId = id
         saveLoops()
     }
 
+    /** Tap on a letter: sets the end of a new loop, otherwise jumps to the loop and loops it. */
+    fun tapLoop(id: Char) {
+        if (awaitingEndId == id) {
+            val l = loops.firstOrNull { it.id == id }
+            awaitingEndId = null
+            if (l != null) {
+                val e = positionMs.coerceIn(0L, durationMs)
+                if (e > l.start + 50) update(id) { it.copy(end = e) }
+                else update(id) { it.copy(end = (it.start + 8_000).coerceAtMost(durationMs)) }
+            }
+        }
+        activate(id)
+    }
+
+    /** If a new loop is still waiting for its end, give it a sensible default end. */
+    private fun finishAwaiting() {
+        val id = awaitingEndId ?: return
+        awaitingEndId = null
+        update(id) { l -> if (l.end >= durationMs) l.copy(end = (l.start + 8_000).coerceAtMost(durationMs)) else l }
+    }
+
+    /** End shown on screen: a loop waiting for its end grows with the playhead. */
+    fun displayEnd(l: Loop): Long =
+        if (awaitingEndId == l.id) maxOf(l.start, positionMs) else l.end
+
     /** Tap a loop: jump straight to its start and loop it. */
     fun activate(id: Char) {
+        if (awaitingEndId != null && awaitingEndId != id) finishAwaiting()
         val l = loops.firstOrNull { it.id == id } ?: return
         activeId = id
         selectedId = id
@@ -409,6 +445,7 @@ class PracticeEngine(private val app: Application) {
 
     fun deleteSelected() {
         val id = selectedId ?: return
+        if (awaitingEndId == id) awaitingEndId = null
         loops.removeAll { it.id == id }
         for (i in loops.indices) if (loops[i].next == id) loops[i] = loops[i].copy(next = null)
         if (activeId == id) activeId = null
@@ -447,6 +484,45 @@ class PracticeEngine(private val app: Application) {
         if (i < 0) return
         loops[i] = f(loops[i])
         saveLoops()
+    }
+
+    // ---------- crash reports ----------
+
+    private fun loadCrashReport() {
+        var report: String? = null
+        try {
+            val f = java.io.File(app.filesDir, "crash.txt")
+            if (f.exists()) {
+                report = f.readText()
+                f.delete()
+            }
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                val am = app.getSystemService(android.app.ActivityManager::class.java)
+                val last = am.getHistoricalProcessExitReasons(app.packageName, 0, 1).firstOrNull()
+                val seen = prefs.getLong("lastExitTs", 0L)
+                if (last != null && last.timestamp > seen) {
+                    prefs.edit().putLong("lastExitTs", last.timestamp).apply()
+                    val r = last.reason
+                    if (report == null && (r == android.app.ApplicationExitInfo.REASON_CRASH_NATIVE ||
+                            r == android.app.ApplicationExitInfo.REASON_CRASH ||
+                            r == android.app.ApplicationExitInfo.REASON_ANR)
+                    ) {
+                        val kind = when (r) {
+                            android.app.ApplicationExitInfo.REASON_CRASH_NATIVE -> "Native crash"
+                            android.app.ApplicationExitInfo.REASON_ANR -> "App froze (ANR)"
+                            else -> "Crash"
+                        }
+                        report = "$kind at ${java.util.Date(last.timestamp)}\n${last.description ?: ""}"
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+        crashReport = report?.take(6000)
+    }
+
+    fun dismissCrash() {
+        crashReport = null
     }
 
     // ---------- remembering everything between sessions ----------
