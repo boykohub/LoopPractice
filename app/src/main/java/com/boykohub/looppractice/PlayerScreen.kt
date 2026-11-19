@@ -458,8 +458,8 @@ fun ScrollingWaveform(vm: PracticeEngine) {
                         var dragged = false
                         do {
                             val ev = awaitPointerEvent()
-                            val zoom = calculateZoom(ev)
-                            val pan = calculatePan(ev)
+                            val zoom = ev.calculateZoom()
+                            val pan = ev.calculatePan()
                             if (ev.changes.size >= 2 && zoom != 1f) {
                                 windowMs = (windowMs / zoom).coerceIn(1500f, 120_000f)
                                 ev.changes.forEach { it.consume() }
