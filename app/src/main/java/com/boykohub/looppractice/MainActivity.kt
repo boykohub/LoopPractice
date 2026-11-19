@@ -48,6 +48,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStop() {
+        vm.saveState()
+        super.onStop()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleIntent(intent)

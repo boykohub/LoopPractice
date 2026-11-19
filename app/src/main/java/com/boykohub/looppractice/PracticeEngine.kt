@@ -84,6 +84,7 @@ class PracticeEngine(private val app: Application) {
         player.addListener(object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
+                if (!playing) saveState()
             }
 
             override fun onPlaybackStateChanged(state: Int) {
@@ -111,6 +112,8 @@ class PracticeEngine(private val app: Application) {
             }
         }
 
+        restoreGlobal()
+
         // Re-open the last file, if we still have permission to read it.
         prefs.getString("lastUri", null)?.let { s ->
             val u = Uri.parse(s)
@@ -119,8 +122,14 @@ class PracticeEngine(private val app: Application) {
         }
     }
 
+    private var saveCounter = 0
+
     private fun tick() {
         positionMs = player.currentPosition
+        if (++saveCounter >= 200) { // about every 2 seconds
+            saveCounter = 0
+            saveState()
+        }
         val l = activeLoop() ?: return
         if (l.end > l.start && player.isPlaying && positionMs >= l.end) {
             onLoopWrap(l)
@@ -152,6 +161,7 @@ class PracticeEngine(private val app: Application) {
                 // Some sources (e.g. "Open with") don't allow keeping access. Playback still works now.
             }
         }
+        saveState() // remember where we were in the previous file
         error = null
         uri = u
         fileName = queryName(u)
@@ -166,8 +176,8 @@ class PracticeEngine(private val app: Application) {
                 .build()
         )
         player.prepare()
-        applyParams()
         loadLoops()
+        restoreState()
         prefs.edit().putString("lastUri", u.toString()).apply()
     }
 
@@ -287,6 +297,72 @@ class PracticeEngine(private val app: Application) {
         if (i < 0) return
         loops[i] = f(loops[i])
         saveLoops()
+    }
+
+    // ---------- remembering everything between sessions ----------
+
+    private var lastSavedState = ""
+    private var lastSavedGlobal = ""
+
+    /** Saves speed, pitch, active/selected loop and position for this file, plus global settings. */
+    fun saveState() {
+        val g = JSONObject()
+            .put("trOn", trainerOn).put("trStep", trainerStepPct)
+            .put("trEvery", trainerEvery).put("trMax", trainerMaxPct)
+            .put("nudge", nudgeStep)
+            .toString()
+        if (g != lastSavedGlobal) {
+            prefs.edit().putString("global", g).apply()
+            lastSavedGlobal = g
+        }
+        val u = uri ?: return
+        if (durationMs <= 0) return // not loaded yet; don't overwrite with empty state
+        val st = JSONObject()
+            .put("speed", speed.toDouble())
+            .put("semi", semitones)
+            .put("active", activeId?.toString() ?: "")
+            .put("sel", selectedId?.toString() ?: "")
+            .put("pos", positionMs)
+            .toString()
+        if (st != lastSavedState) {
+            prefs.edit().putString("state:$u", st).apply()
+            lastSavedState = st
+        }
+    }
+
+    private fun restoreState() {
+        val u = uri ?: return
+        val s = prefs.getString("state:$u", null)
+        speed = 1f
+        semitones = 0
+        if (s != null) {
+            try {
+                val o = JSONObject(s)
+                speed = o.optDouble("speed", 1.0).toFloat().coerceIn(0.25f, 2f)
+                semitones = o.optInt("semi", 0).coerceIn(-12, 12)
+                activeId = o.optString("active", "").firstOrNull()?.takeIf { c -> loops.any { it.id == c } }
+                o.optString("sel", "").firstOrNull()?.takeIf { c -> loops.any { it.id == c } }?.let { selectedId = it }
+                val pos = o.optLong("pos", 0L).coerceAtLeast(0L)
+                player.seekTo(pos)
+                positionMs = pos
+            } catch (_: Exception) {
+            }
+        }
+        lastSavedState = ""
+        applyParams()
+    }
+
+    private fun restoreGlobal() {
+        val s = prefs.getString("global", null) ?: return
+        try {
+            val o = JSONObject(s)
+            trainerOn = o.optBoolean("trOn", false)
+            trainerStepPct = o.optInt("trStep", 5)
+            trainerEvery = o.optInt("trEvery", 2)
+            trainerMaxPct = o.optInt("trMax", 100)
+            nudgeStep = o.optLong("nudge", 100L)
+        } catch (_: Exception) {
+        }
     }
 
     private fun loopsKey() = "loops:" + (uri?.toString() ?: "")
