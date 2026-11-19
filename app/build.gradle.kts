@@ -38,7 +38,10 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8: removes unused code from Compose/Media3 and shrinks resources.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.getByName("release")
         }
     }
@@ -50,6 +53,12 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    packaging {
+        // Store the native stretch library compressed inside the APK (smaller download).
+        jniLibs { useLegacyPackaging = true }
+        resources { excludes += listOf("META-INF/**", "kotlin/**", "**.kotlin_builtins", "DebugProbesKt.bin") }
+    }
+
     lint {
         checkReleaseBuilds = false
         abortOnError = false

@@ -21,4 +21,7 @@ target_include_directories(musicstretch PRIVATE
     ${DEPS}/rubberband
 )
 
-target_compile_options(musicstretch PRIVATE -O3 -Wno-everything)
+target_compile_options(musicstretch PRIVATE -O2 -Wno-everything
+    -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections)
+# Drop unused code and keep only the JNI functions exported.
+target_link_options(musicstretch PRIVATE -Wl,--gc-sections -Wl,--strip-all)
