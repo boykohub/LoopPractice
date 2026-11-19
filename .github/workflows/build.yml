@@ -30,7 +30,10 @@ jobs:
           git clone --depth 1 https://github.com/Signalsmith-Audio/linear.git signalsmith-linear
           git clone --depth 1 --branch v4.0.0 https://github.com/breakfastquay/rubberband.git rubberband \
             || git clone --depth 1 https://github.com/breakfastquay/rubberband.git rubberband
-          ls signalsmith-stretch signalsmith-linear rubberband/single
+          git clone --depth 1 https://github.com/marton78/pffft.git pffft
+          echo "--- how signalsmith-linear uses PFFFT ---"
+          grep -rn -i "pffft" signalsmith-linear --include=*.h | head -40 || true
+          ls pffft
 
       - name: Build
         run: gradle :app:assembleRelease --no-daemon --stacktrace

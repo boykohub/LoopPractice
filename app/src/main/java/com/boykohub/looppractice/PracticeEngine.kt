@@ -24,6 +24,9 @@ import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.RenderersFactory
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.audio.MediaCodecAudioRenderer
+import androidx.media3.exoplayer.video.MediaCodecVideoRenderer
+import androidx.media3.common.Tracks
+import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
@@ -46,6 +49,8 @@ data class Loop(
     val end: Long,
     val repeats: Int = 0,
     val next: Char? = null,
+    /** This loop's own playback speed (each loop remembers its own). */
+    val speed: Float? = null,
 )
 
 /**
@@ -61,11 +66,14 @@ class PracticeEngine(private val app: Application) {
     /** Our own time-stretch (Signalsmith for melody, Rubber Band for drums) instead of Media3's Sonic. */
     val stretch = StretchProcessor()
 
-    private val renderers = RenderersFactory { handler, _, audioListener, _, _ ->
+    private val renderers = RenderersFactory { handler, videoListener, audioListener, _, _ ->
         val sink = DefaultAudioSink.Builder(app)
             .setAudioProcessorChain(StretchChain(stretch))
             .build()
-        arrayOf<Renderer>(MediaCodecAudioRenderer(app, MediaCodecSelector.DEFAULT, handler, audioListener, sink))
+        arrayOf<Renderer>(
+            MediaCodecAudioRenderer(app, MediaCodecSelector.DEFAULT, handler, audioListener, sink),
+            MediaCodecVideoRenderer(app, MediaCodecSelector.DEFAULT, 5000L, handler, videoListener, 50),
+        )
     }
 
     val player: ExoPlayer = ExoPlayer.Builder(app, renderers)
@@ -89,7 +97,18 @@ class PracticeEngine(private val app: Application) {
     var positionMs by mutableLongStateOf(0L); private set
     var isPlaying by mutableStateOf(false); private set
 
+    /** Speed being played right now (the active loop's speed, or the song speed). */
     var speed by mutableFloatStateOf(1f); private set
+    /** Speed used when no loop is active. */
+    private var songSpeed = 1f
+
+    // ---------- video ----------
+    var hasVideo by mutableStateOf(false); private set
+    var videoAspect by mutableFloatStateOf(16f / 9f); private set
+    var videoOn by mutableStateOf(true); private set
+
+    /** True while the app is on screen; the position check runs less often when it isn't. */
+    @Volatile var uiVisible = true
     var semitones by mutableIntStateOf(0); private set
 
     /** 0 = Melody (Signalsmith Stretch), 1 = Drums (Rubber Band, crisp transients). */
@@ -136,6 +155,16 @@ class PracticeEngine(private val app: Application) {
                 }
             }
 
+            override fun onTracksChanged(tracks: Tracks) {
+                hasVideo = tracks.groups.any { it.type == C.TRACK_TYPE_VIDEO }
+            }
+
+            override fun onVideoSizeChanged(size: VideoSize) {
+                if (size.width > 0 && size.height > 0) {
+                    videoAspect = size.width * size.pixelWidthHeightRatio / size.height
+                }
+            }
+
             override fun onPlayerError(e: PlaybackException) {
                 error = "Can't play this file (${e.errorCodeName})"
             }
@@ -144,7 +173,7 @@ class PracticeEngine(private val app: Application) {
         scope.launch {
             while (true) {
                 tick()
-                delay(10)
+                delay(if (uiVisible) 10 else 25)
             }
         }
 
@@ -180,6 +209,7 @@ class PracticeEngine(private val app: Application) {
             activeId = nxt.id
             selectedId = nxt.id
             reps = 0
+            nxt.speed?.let { speed = it; applyParams() }
             nxt
         } else l
         // If the next loop starts right where this one ends, just keep playing (no seek, no gap).
@@ -287,6 +317,8 @@ class PracticeEngine(private val app: Application) {
 
     fun changeSpeed(v: Float) {
         speed = ((v.coerceIn(0.25f, 2f) * 100f).roundToInt()) / 100f
+        val id = activeId
+        if (id != null) update(id) { it.copy(speed = speed) } else songSpeed = speed
         applyParams()
     }
 
@@ -336,7 +368,7 @@ class PracticeEngine(private val app: Application) {
         val start = positionMs.coerceIn(0, durationMs)
         var end = (start + 8_000).coerceAtMost(durationMs)
         if (end - start < 200) end = durationMs
-        loops.add(Loop(id, start, end))
+        loops.add(Loop(id, start, end, speed = speed))
         loops.sortBy { it.id }
         selectedId = id
         saveLoops()
@@ -348,6 +380,9 @@ class PracticeEngine(private val app: Application) {
         activeId = id
         selectedId = id
         reps = 0
+        speed = l.speed ?: speed
+        if (l.speed == null) update(id) { it.copy(speed = speed) }
+        applyParams()
         player.seekTo(l.start)
         positionMs = l.start
         player.play()
@@ -360,6 +395,16 @@ class PracticeEngine(private val app: Application) {
     fun loopOff() {
         activeId = null
         reps = 0
+        speed = songSpeed
+        applyParams()
+    }
+
+    fun changeVideoOn(on: Boolean) {
+        videoOn = on
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !on)
+            .build()
+        saveState()
     }
 
     fun deleteSelected() {
@@ -415,6 +460,7 @@ class PracticeEngine(private val app: Application) {
             .put("trOn", trainerOn).put("trStep", trainerStepPct)
             .put("trEvery", trainerEvery).put("trMax", trainerMaxPct)
             .put("nudge", nudgeStep)
+            .put("video", videoOn)
             .toString()
         if (g != lastSavedGlobal) {
             prefs.edit().putString("global", g).apply()
@@ -423,7 +469,7 @@ class PracticeEngine(private val app: Application) {
         val u = uri ?: return
         if (durationMs <= 0) return // not loaded yet; don't overwrite with empty state
         val st = JSONObject()
-            .put("speed", speed.toDouble())
+            .put("speed", songSpeed.toDouble())
             .put("semi", semitones)
             .put("active", activeId?.toString() ?: "")
             .put("sel", selectedId?.toString() ?: "")
@@ -439,13 +485,13 @@ class PracticeEngine(private val app: Application) {
     private fun restoreState() {
         val u = uri ?: return
         val s = prefs.getString("state:$u", null)
-        speed = 1f
+        songSpeed = 1f
         semitones = 0
         var mode = StretchProcessor.MODE_MELODY
         if (s != null) {
             try {
                 val o = JSONObject(s)
-                speed = o.optDouble("speed", 1.0).toFloat().coerceIn(0.25f, 2f)
+                songSpeed = o.optDouble("speed", 1.0).toFloat().coerceIn(0.25f, 2f)
                 semitones = o.optInt("semi", 0).coerceIn(-12, 12)
                 activeId = o.optString("active", "").firstOrNull()?.takeIf { c -> loops.any { it.id == c } }
                 o.optString("sel", "").firstOrNull()?.takeIf { c -> loops.any { it.id == c } }?.let { selectedId = it }
@@ -457,6 +503,7 @@ class PracticeEngine(private val app: Application) {
             }
         }
         lastSavedState = ""
+        speed = activeLoop()?.speed ?: songSpeed
         stretchMode = mode
         stretch.requestMode(mode)
         applyParams()
@@ -471,6 +518,7 @@ class PracticeEngine(private val app: Application) {
             trainerEvery = o.optInt("trEvery", 2)
             trainerMaxPct = o.optInt("trMax", 100)
             nudgeStep = o.optLong("nudge", 100L)
+            changeVideoOn(o.optBoolean("video", true))
         } catch (_: Exception) {
         }
     }
@@ -484,6 +532,7 @@ class PracticeEngine(private val app: Application) {
             arr.put(
                 JSONObject().put("id", l.id.toString()).put("s", l.start).put("e", l.end)
                     .put("r", l.repeats).put("n", l.next?.toString() ?: "")
+                    .apply { l.speed?.let { put("sp", it.toDouble()) } }
             )
         }
         prefs.edit().putString(loopsKey(), arr.toString()).apply()
@@ -499,7 +548,8 @@ class PracticeEngine(private val app: Application) {
                 loops.add(
                     Loop(
                         o.getString("id")[0], o.getLong("s"), o.getLong("e"),
-                        o.optInt("r", 0), o.optString("n", "").firstOrNull()
+                        o.optInt("r", 0), o.optString("n", "").firstOrNull(),
+                        if (o.has("sp")) o.getDouble("sp").toFloat().coerceIn(0.25f, 2f) else null
                     )
                 )
             }

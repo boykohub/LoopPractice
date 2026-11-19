@@ -41,6 +41,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        vm.uiVisible = true
         // Starts the background-playback service (allowed here because the app is in front).
         try {
             startService(Intent(this, PlaybackService::class.java))
@@ -49,6 +50,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        vm.uiVisible = false
         vm.saveState()
         super.onStop()
     }
@@ -59,8 +61,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIntent(i: Intent?) {
-        if (i?.action == Intent.ACTION_VIEW) {
-            i.data?.let { vm.load(it) }
+        when (i?.action) {
+            Intent.ACTION_VIEW -> i.data?.let { vm.load(it) }
+            // "Share → Music Practice" from Files, Gallery, Drive, WhatsApp…
+            Intent.ACTION_SEND -> {
+                val u: android.net.Uri? = if (android.os.Build.VERSION.SDK_INT >= 33)
+                    i.getParcelableExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
+                else
+                    @Suppress("DEPRECATION") i.getParcelableExtra(Intent.EXTRA_STREAM)
+                (u ?: i.data)?.let { vm.load(it) }
+            }
         }
     }
 }

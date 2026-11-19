@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -118,6 +119,15 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
                 color = Color.Gray
             )
             return@Column
+        }
+
+        // ---------- video (only for video files) ----------
+        if (vm.hasVideo) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Show video", modifier = Modifier.weight(1f))
+                Switch(checked = vm.videoOn, onCheckedChange = { vm.changeVideoOn(it) })
+            }
+            if (vm.videoOn) VideoBox(vm)
         }
 
         // ---------- waveform ----------
@@ -252,7 +262,7 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
         }
 
         // ---------- speed ----------
-        Section("Speed  ${(vm.speed * 100).toInt()}%") {
+        Section("Speed  ${(vm.speed * 100).toInt()}%" + (vm.activeId?.let { "  · loop $it" } ?: "")) {
             Slider(value = vm.speed, onValueChange = { vm.changeSpeed(it) }, valueRange = 0.25f..2f)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = { vm.changeSpeed(vm.speed - 0.05f) }, modifier = Modifier.weight(1f)) { Text("−5%") }
@@ -260,6 +270,10 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
                 OutlinedButton(onClick = { vm.changeSpeed(vm.speed + 0.01f) }, modifier = Modifier.weight(1f)) { Text("+1%") }
                 OutlinedButton(onClick = { vm.changeSpeed(vm.speed + 0.05f) }, modifier = Modifier.weight(1f)) { Text("+5%") }
             }
+            Text(
+                if (vm.activeId != null) "Each loop remembers its own speed." else "Speed for the whole song (loops keep their own).",
+                style = MaterialTheme.typography.bodySmall, color = Color.Gray
+            )
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf(50, 60, 70, 75, 80, 90, 100, 125).forEach { p ->
                     TextButton(onClick = { vm.changeSpeed(p / 100f) }) {
@@ -538,4 +552,18 @@ fun ScrollingWaveform(vm: PracticeEngine) {
             style = MaterialTheme.typography.bodySmall, color = Color.Gray
         )
     }
+}
+
+@Composable
+fun VideoBox(vm: PracticeEngine) {
+    androidx.compose.ui.viewinterop.AndroidView(
+        factory = { ctx ->
+            android.view.SurfaceView(ctx).also { vm.player.setVideoSurfaceView(it) }
+        },
+        onRelease = { vm.player.clearVideoSurfaceView(it) },
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(vm.videoAspect.coerceIn(0.5f, 2.4f))
+            .clip(RoundedCornerShape(14.dp))
+    )
 }

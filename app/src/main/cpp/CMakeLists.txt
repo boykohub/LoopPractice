@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22.1)
-project(musicstretch CXX)
+project(musicstretch C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,6 +20,13 @@ target_include_directories(musicstretch PRIVATE
     ${DEPS}/signalsmith-linear/include
     ${DEPS}/rubberband
 )
+
+# Faster FFT for the Melody engine (PFFFT, BSD licence, uses the phone's NEON SIMD).
+if(EXISTS ${DEPS}/pffft/pffft.c)
+    target_sources(musicstretch PRIVATE ${DEPS}/pffft/pffft.c)
+    target_include_directories(musicstretch PRIVATE ${DEPS}/pffft)
+    target_compile_definitions(musicstretch PRIVATE SIGNALSMITH_USE_PFFFT=1)
+endif()
 
 target_compile_options(musicstretch PRIVATE -O2 -Wno-everything
     -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections)
