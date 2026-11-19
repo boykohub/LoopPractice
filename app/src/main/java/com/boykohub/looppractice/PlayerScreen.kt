@@ -4,6 +4,10 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -449,13 +453,13 @@ fun ScrollingWaveform(vm: PracticeEngine) {
                     }
                 }
                 .pointerInput(dur) {
-                    androidx.compose.foundation.gestures.awaitEachGesture {
-                        androidx.compose.foundation.gestures.awaitFirstDown(requireUnconsumed = false)
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
                         var dragged = false
                         do {
                             val ev = awaitPointerEvent()
-                            val zoom = androidx.compose.foundation.gestures.calculateZoom(ev)
-                            val pan = androidx.compose.foundation.gestures.calculatePan(ev)
+                            val zoom = calculateZoom(ev)
+                            val pan = calculatePan(ev)
                             if (ev.changes.size >= 2 && zoom != 1f) {
                                 windowMs = (windowMs / zoom).coerceIn(1500f, 120_000f)
                                 ev.changes.forEach { it.consume() }
