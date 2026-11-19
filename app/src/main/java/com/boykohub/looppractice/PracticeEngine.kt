@@ -143,7 +143,7 @@ class PracticeEngine(private val app: Application) {
         reps += 1
         if (trainerOn && trainerEvery > 0 && reps % trainerEvery == 0) {
             val max = trainerMaxPct / 100f
-            if (speed < max) setSpeed((speed + trainerStepPct / 100f).coerceAtMost(max))
+            if (speed < max) changeSpeed((speed + trainerStepPct / 100f).coerceAtMost(max))
         }
     }
 
@@ -211,7 +211,7 @@ class PracticeEngine(private val app: Application) {
 
     // ---------- speed & pitch ----------
 
-    fun setSpeed(v: Float) {
+    fun changeSpeed(v: Float) {
         speed = ((v.coerceIn(0.25f, 2f) * 100f).roundToInt()) / 100f
         applyParams()
     }

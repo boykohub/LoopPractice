@@ -209,16 +209,16 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
 
         // ---------- speed ----------
         Section("Speed  ${(vm.speed * 100).toInt()}%") {
-            Slider(value = vm.speed, onValueChange = { vm.setSpeed(it) }, valueRange = 0.25f..2f)
+            Slider(value = vm.speed, onValueChange = { vm.changeSpeed(it) }, valueRange = 0.25f..2f)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { vm.setSpeed(vm.speed - 0.05f) }, modifier = Modifier.weight(1f)) { Text("−5%") }
-                OutlinedButton(onClick = { vm.setSpeed(vm.speed - 0.01f) }, modifier = Modifier.weight(1f)) { Text("−1%") }
-                OutlinedButton(onClick = { vm.setSpeed(vm.speed + 0.01f) }, modifier = Modifier.weight(1f)) { Text("+1%") }
-                OutlinedButton(onClick = { vm.setSpeed(vm.speed + 0.05f) }, modifier = Modifier.weight(1f)) { Text("+5%") }
+                OutlinedButton(onClick = { vm.changeSpeed(vm.speed - 0.05f) }, modifier = Modifier.weight(1f)) { Text("−5%") }
+                OutlinedButton(onClick = { vm.changeSpeed(vm.speed - 0.01f) }, modifier = Modifier.weight(1f)) { Text("−1%") }
+                OutlinedButton(onClick = { vm.changeSpeed(vm.speed + 0.01f) }, modifier = Modifier.weight(1f)) { Text("+1%") }
+                OutlinedButton(onClick = { vm.changeSpeed(vm.speed + 0.05f) }, modifier = Modifier.weight(1f)) { Text("+5%") }
             }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf(50, 60, 70, 75, 80, 90, 100, 125).forEach { p ->
-                    TextButton(onClick = { vm.setSpeed(p / 100f) }) {
+                    TextButton(onClick = { vm.changeSpeed(p / 100f) }) {
                         Text("$p%", color = if ((vm.speed * 100).toInt() == p) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary)
                     }
                 }
