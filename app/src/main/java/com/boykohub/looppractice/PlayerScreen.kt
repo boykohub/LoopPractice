@@ -13,6 +13,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import kotlinx.coroutines.delay
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -107,6 +108,13 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
         onDispose { }
     }
 
+    var showSongs by androidx.compose.runtime.saveable.rememberSaveable { androidx.compose.runtime.mutableStateOf(false) }
+    if (showSongs) {
+        androidx.activity.compose.BackHandler { showSongs = false }
+        SongsScreen(vm, onClose = { showSongs = false }, onOpen = { showSongs = false; onOpen() })
+        return
+    }
+
     Column(
         Modifier
             .fillMaxSize()
@@ -123,9 +131,12 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
                     maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
             }
+            OutlinedButton(onClick = { showSongs = true }, contentPadding = ButtonDefaults.TextButtonContentPadding) { Text("Songs") }
+            Spacer(Modifier.width(6.dp))
             FilledTonalButton(onClick = onOpen) { Text("Open") }
         }
 
+        if (vm.importing) Text("Importing…", color = MaterialTheme.colorScheme.primary)
         vm.crashReport?.let { CrashCard(it) { vm.dismissCrash() } }
         vm.error?.let { Text(it, color = Color(0xFFFF8FA3)) }
 
@@ -186,10 +197,18 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
             Section(
                 "Loops" + when {
                     vm.awaitingEndId != null -> "  · tap ${vm.awaitingEndId} to set its end"
+                    vm.joinMode && vm.joined.size >= 2 -> "  · ${vm.joined.sorted().joinToString("+")} ×${vm.reps}"
+                    vm.joinMode -> "  · tap letters to join"
                     vm.activeId != null -> "  · ${vm.activeId} ×${vm.reps}"
                     else -> ""
                 },
-                trailing = { if (vm.activeId != null) TextButton(onClick = { vm.loopOff() }) { Text("Loop off") } }
+                trailing = {
+                    if (vm.loops.size >= 2) {
+                        if (vm.joinMode) Button(onClick = { vm.toggleJoinMode() }, contentPadding = ButtonDefaults.TextButtonContentPadding) { Text("Join") }
+                        else TextButton(onClick = { vm.toggleJoinMode() }) { Text("Join") }
+                    }
+                    if (vm.activeId != null || vm.joined.isNotEmpty()) TextButton(onClick = { vm.loopOff() }) { Text("Loop off") }
+                }
             ) {
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -197,13 +216,15 @@ fun PlayerScreen(vm: PracticeEngine, onOpen: () -> Unit) {
                 ) {
                     vm.loops.forEach { l ->
                         val c = loopColor(l.id)
-                        val active = vm.activeId == l.id
+                        val inJoin = l.id in vm.joined
+                        val active = vm.activeId == l.id || (inJoin && vm.joined.size >= 2)
                         val selected = vm.selectedId == l.id
                         val awaiting = vm.awaitingEndId == l.id
                         Box(
                             Modifier
                                 .size(width = 72.dp, height = 56.dp)
                                 .clip(RoundedCornerShape(12.dp))
+                                .then(if (vm.joinMode) Modifier.border(2.dp, if (inJoin) Color.White else c.copy(alpha = 0.4f), RoundedCornerShape(12.dp)) else Modifier)
                                 .background(if (active) c else c.copy(alpha = if (awaiting) 0.35f else 0.18f))
                                 .combinedClickable(
                                     onClick = { vm.tapLoop(l.id) },
@@ -491,6 +512,11 @@ fun Timeline(vm: PracticeEngine) {
             val y = 4f + (i % 2) * laneH
             safeLabel(measurer, l.id.toString(), x0 + 6f, y, TextStyle(color = c, fontSize = 12.sp, fontWeight = FontWeight.Bold))
         }
+        vm.joinedRange()?.let { r ->
+            val jx0 = r.first.toFloat() / dur * w
+            val jx1 = r.last.toFloat() / dur * w
+            drawRect(Color(0x55FFFFFF), topLeft = Offset(jx0, h - 6f), size = Size((jx1 - jx0).coerceAtLeast(2f), 6f))
+        }
         val px = vm.positionMs.toFloat() / dur * w
         drawRect(Color.White, topLeft = Offset(px - 2f, 0f), size = Size(4f, h))
     }
@@ -611,6 +637,13 @@ fun ScrollingWaveform(vm: PracticeEngine) {
                 safeLabel(measurer, "Drawing waveform…", 16f, mid - 20f, TextStyle(color = Color.Gray, fontSize = 13.sp))
             }
 
+            // joined span
+            vm.joinedRange()?.let { r ->
+                val jx0 = ((r.first - t0) / msPerPx).coerceAtLeast(-4f)
+                val jx1 = ((r.last - t0) / msPerPx).coerceAtMost(w + 4f)
+                if (jx1 > jx0) drawRect(Color(0x26FFFFFF), topLeft = Offset(jx0, h - 8f), size = Size(jx1 - jx0, 8f))
+            }
+
             // playhead
             drawRect(Color.White, topLeft = Offset(w / 2f - 1.5f, 0f), size = Size(3f, h))
             // zoom indicator
@@ -632,4 +665,84 @@ fun VideoBox(vm: PracticeEngine) {
             .aspectRatio(vm.videoAspect.coerceIn(0.5f, 2.4f))
             .clip(RoundedCornerShape(14.dp))
     )
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+/** Saved songs: every imported file with its own loops and settings. */
+@Composable
+fun SongsScreen(vm: PracticeEngine, onClose: () -> Unit, onOpen: () -> Unit) {
+    var renaming by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<Song?>(null) }
+    var removing by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<Song?>(null) }
+    val df = androidx.compose.runtime.remember { java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM) }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .safeDrawingPadding()
+            .padding(horizontal = 16.dp)
+    ) {
+        Row(Modifier.padding(top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = onClose) { Text("‹ Back") }
+            Text("Songs", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+            FilledTonalButton(onClick = onOpen) { Text("Import") }
+        }
+        if (vm.songs.isEmpty()) {
+            Text(
+                "No songs yet. Import a file with Import, or use Share → Music Practice from another app.",
+                color = Color.Gray, modifier = Modifier.padding(top = 24.dp)
+            )
+        }
+        Column(
+            Modifier.weight(1f).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            vm.songs.forEach { song ->
+                val current = vm.uri?.toString() == song.uri
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(
+                            if (current) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+                            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                        )
+                        .combinedClickable(onClick = { vm.openSong(song); onClose() })
+                        .padding(start = 14.dp, top = 6.dp, bottom = 6.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(song.name, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        val n = vm.loopCount(song)
+                        Text(
+                            "$n loop${if (n == 1) "" else "s"} · ${df.format(java.util.Date(song.lastOpened))}",
+                            style = MaterialTheme.typography.bodySmall, color = Color.Gray
+                        )
+                    }
+                    TextButton(onClick = { renaming = song }) { Text("Rename") }
+                    TextButton(onClick = { removing = song }) { Text("Remove", color = Color(0xFFFF8FA3)) }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+
+    renaming?.let { song ->
+        var text by androidx.compose.runtime.remember(song) { androidx.compose.runtime.mutableStateOf(song.name) }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { renaming = null },
+            title = { Text("Rename song") },
+            text = { androidx.compose.material3.OutlinedTextField(value = text, onValueChange = { text = it }, singleLine = true) },
+            confirmButton = { TextButton(onClick = { vm.renameSong(song, text); renaming = null }) { Text("Save") } },
+            dismissButton = { TextButton(onClick = { renaming = null }) { Text("Cancel") } }
+        )
+    }
+    removing?.let { song ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { removing = null },
+            title = { Text("Remove \"${song.name}\"?") },
+            text = { Text("Its loops and settings are deleted. Your original file is not touched.") },
+            confirmButton = { TextButton(onClick = { vm.removeSong(song); removing = null }) { Text("Remove", color = Color(0xFFFF8FA3)) } },
+            dismissButton = { TextButton(onClick = { removing = null }) { Text("Cancel") } }
+        )
+    }
 }

@@ -34,6 +34,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.pow
@@ -43,6 +44,8 @@ import kotlin.math.roundToInt
  * A loop. [repeats] = how many times it plays before moving on to [next] (0 = forever).
  * With no [next], it just keeps looping.
  */
+data class Song(val uri: String, val name: String, val lastOpened: Long)
+
 data class Loop(
     val id: Char,
     val start: Long,
@@ -126,6 +129,14 @@ class PracticeEngine(private val app: Application) {
     var selectedId by mutableStateOf<Char?>(null); private set
     /** A loop just made with "+": its end is set by tapping its letter. */
     var awaitingEndId by mutableStateOf<Char?>(null); private set
+
+    /** Join mode: tap letters to play several loops as one span (gaps included). Loops stay unchanged. */
+    var joinMode by mutableStateOf(false); private set
+    val joined = mutableStateListOf<Char>()
+
+    /** Song library: every imported file, with its own saved loops and settings. */
+    val songs = mutableStateListOf<Song>()
+    var importing by mutableStateOf(false); private set
     /** Details of a crash from the last run, shown once with a Copy button. */
     var crashReport by mutableStateOf<String?>(null); private set
     var reps by mutableIntStateOf(0); private set
@@ -152,10 +163,8 @@ class PracticeEngine(private val app: Application) {
                     if (d != C.TIME_UNSET && d > 0) durationMs = d
                 }
                 if (state == Player.STATE_ENDED) {
-                    val l = activeLoop()
-                    if (l != null) {
-                        onLoopWrap(l)
-                    }
+                    if (joinedRange() != null) onJoinedWrap()
+                    else activeLoop()?.let { onLoopWrap(it) }
                 }
             }
 
@@ -184,11 +193,12 @@ class PracticeEngine(private val app: Application) {
         restoreGlobal()
         loadCrashReport()
 
-        // Re-open the last file, if we still have permission to read it.
+        loadLibrary()
+
+        // Re-open the last song, if we can still read it.
         prefs.getString("lastUri", null)?.let { s ->
             val u = Uri.parse(s)
-            val ok = app.contentResolver.persistedUriPermissions.any { it.uri == u && it.isReadPermission }
-            if (ok) load(u, takePermission = false)
+            if (canRead(u)) openUri(u, null)
         }
     }
 
@@ -200,10 +210,89 @@ class PracticeEngine(private val app: Application) {
             saveCounter = 0
             saveState()
         }
+        val jr = joinedRange()
+        if (jr != null) {
+            if (player.isPlaying && positionMs >= jr.last) onJoinedWrap()
+            return
+        }
         val l = activeLoop() ?: return
         if (l.end > l.start && player.isPlaying && positionMs >= l.end) {
             onLoopWrap(l)
         }
+    }
+
+    /** Span played in join mode: from the earliest start to the latest end of the joined loops. */
+    fun joinedRange(): LongRange? {
+        if (joined.size < 2) return null
+        val ls = loops.filter { it.id in joined }
+        if (ls.size < 2) return null
+        return ls.minOf { it.start }..ls.maxOf { it.end }
+    }
+
+    /** Range that is looping right now (joined span or the active loop), if any. */
+    fun loopRange(): LongRange? = joinedRange() ?: activeLoop()?.let { it.start..it.end }
+
+    private fun onJoinedWrap() {
+        val r = joinedRange() ?: return
+        reps += 1
+        player.seekTo(r.first)
+        positionMs = r.first
+        if (!player.playWhenReady) player.play()
+        if (trainerOn && trainerEvery > 0 && reps % trainerEvery == 0) {
+            val max = trainerMaxPct / 100f
+            if (speed < max) changeSpeed((speed + trainerStepPct / 100f).coerceAtMost(max))
+        }
+    }
+
+    fun toggleJoinMode() {
+        if (joinMode) {
+            // Leave join mode: go back to looping the first joined loop on its own.
+            val first = joined.firstOrNull()
+            joinMode = false
+            joined.clear()
+            if (first != null) activate(first) else reps = 0
+        } else {
+            finishAwaiting()
+            joinMode = true
+            joined.clear()
+            activeId?.let { joined.add(it) }
+        }
+    }
+
+    private fun toggleJoined(id: Char) {
+        if (id in joined) joined.remove(id) else joined.add(id)
+        selectedId = id
+        reps = 0
+        when {
+            joined.size >= 2 -> {
+                // Play the joined span at the song speed; keep playing if we're already inside it.
+                activeId = null
+                speed = songSpeed
+                applyParams()
+                val r = joinedRange()!!
+                if (positionMs < r.first || positionMs > r.last) {
+                    player.seekTo(r.first); positionMs = r.first
+                }
+                player.play()
+            }
+            joined.size == 1 -> {
+                val only = joined.first()
+                val l = loops.firstOrNull { it.id == only } ?: return
+                activeId = only
+                speed = l.speed ?: speed
+                applyParams()
+                if (positionMs < l.start || positionMs > l.end) {
+                    player.seekTo(l.start); positionMs = l.start
+                }
+                player.play()
+            }
+            else -> {
+                activeId = null
+                speed = songSpeed
+                applyParams()
+            }
+        }
+        saveState()
     }
 
     private fun onLoopWrap(l: Loop) {
@@ -235,23 +324,70 @@ class PracticeEngine(private val app: Application) {
 
     // ---------- file ----------
 
-    fun load(u: Uri, takePermission: Boolean = true) {
-        val ctx = app
-        if (takePermission) {
-            try {
-                ctx.contentResolver.takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            } catch (_: Exception) {
-                // Some sources (e.g. "Open with") don't allow keeping access. Playback still works now.
-            }
+    /**
+     * Import a file (Open button, Share, Open with). If Android lets us keep access, we play it
+     * in place; otherwise (e.g. shared from WhatsApp) we copy it into the app so the song can
+     * always be reopened from the Songs list.
+     */
+    fun load(u: Uri) {
+        val name = queryName(u)
+        val kept = try {
+            app.contentResolver.takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            true
+        } catch (_: Exception) {
+            false
         }
-        saveState() // remember where we were in the previous file
+        if (kept || u.scheme == "file") {
+            openUri(u, name)
+            return
+        }
+        importing = true
+        scope.launch {
+            val copy = withContext(Dispatchers.IO) {
+                try {
+                    val dir = java.io.File(app.filesDir, "songs").apply { mkdirs() }
+                    val safe = name.replace(Regex("[^A-Za-z0-9._ -]"), "_").take(80)
+                    val f = java.io.File(dir, "${System.currentTimeMillis()}_$safe")
+                    app.contentResolver.openInputStream(u)!!.use { inp -> f.outputStream().use { inp.copyTo(it) } }
+                    f
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            importing = false
+            if (copy != null) openUri(Uri.fromFile(copy), name)
+            else openUri(u, name) // play it now at least
+        }
+    }
+
+    /** Open a song from the Songs list. */
+    fun openSong(song: Song) {
+        val u = Uri.parse(song.uri)
+        if (!canRead(u)) {
+            error = "Can't open \"${song.name}\" any more — the file was moved or access was lost. Import it again with Open."
+            return
+        }
+        openUri(u, null)
+    }
+
+    private fun canRead(u: Uri): Boolean = when (u.scheme) {
+        "file" -> u.path?.let { java.io.File(it).exists() } == true
+        else -> app.contentResolver.persistedUriPermissions.any { it.uri == u && it.isReadPermission }
+    }
+
+    private fun openUri(u: Uri, displayName: String?) {
+        saveState() // remember where we were in the previous song
         error = null
         uri = u
-        fileName = queryName(u)
+        val existing = songs.firstOrNull { it.uri == u.toString() }
+        fileName = existing?.name ?: displayName ?: queryName(u)
+        upsertSong(u.toString(), fileName)
         durationMs = 0L
         activeId = null
         selectedId = null
         awaitingEndId = null
+        joinMode = false
+        joined.clear()
         reps = 0
         player.setMediaItem(
             MediaItem.Builder()
@@ -280,7 +416,7 @@ class PracticeEngine(private val app: Application) {
 
     fun togglePlay() {
         if (uri == null) return
-        if (player.playbackState == Player.STATE_ENDED) player.seekTo(activeLoop()?.start ?: 0L)
+        if (player.playbackState == Player.STATE_ENDED) player.seekTo(loopRange()?.first ?: 0L)
         if (player.isPlaying) player.pause() else player.play()
     }
 
@@ -292,10 +428,10 @@ class PracticeEngine(private val app: Application) {
 
     /** Jump back/forward. While a loop is active, stays inside the loop. */
     fun skip(deltaMs: Long) {
-        val l = activeLoop()
+        val r = loopRange()
         var t = positionMs + deltaMs
-        if (l != null && positionMs >= l.start && positionMs <= l.end) {
-            t = t.coerceIn(l.start, maxOf(l.start, l.end - 50))
+        if (r != null && positionMs >= r.first && positionMs <= r.last) {
+            t = t.coerceIn(r.first, maxOf(r.first, r.last - 50))
         }
         seekTo(t)
     }
@@ -317,7 +453,67 @@ class PracticeEngine(private val app: Application) {
         scrubbingUntil = android.os.SystemClock.uptimeMillis() + 150
     }
 
-    fun toStart() = seekTo(activeLoop()?.start ?: 0L)
+    fun toStart() = seekTo(loopRange()?.first ?: 0L)
+
+    // ---------- song library ----------
+
+    private fun loadLibrary() {
+        songs.clear()
+        try {
+            val arr = JSONArray(prefs.getString("library", "[]"))
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                songs.add(Song(o.getString("u"), o.getString("n"), o.optLong("t", 0L)))
+            }
+        } catch (_: Exception) {
+        }
+        songs.sortByDescending { it.lastOpened }
+    }
+
+    private fun saveLibrary() {
+        val arr = JSONArray()
+        songs.forEach { arr.put(JSONObject().put("u", it.uri).put("n", it.name).put("t", it.lastOpened)) }
+        prefs.edit().putString("library", arr.toString()).apply()
+    }
+
+    private fun upsertSong(u: String, name: String) {
+        songs.removeAll { it.uri == u }
+        songs.add(0, Song(u, name, System.currentTimeMillis()))
+        saveLibrary()
+    }
+
+    fun renameSong(song: Song, newName: String) {
+        val n = newName.trim().ifEmpty { return }
+        val i = songs.indexOfFirst { it.uri == song.uri }
+        if (i < 0) return
+        songs[i] = songs[i].copy(name = n)
+        if (uri?.toString() == song.uri) fileName = n
+        saveLibrary()
+    }
+
+    /** Remove a song: its loops and settings, and the app's own copy of the file if it made one. */
+    fun removeSong(song: Song) {
+        songs.removeAll { it.uri == song.uri }
+        saveLibrary()
+        prefs.edit().remove("loops:${song.uri}").remove("state:${song.uri}").apply()
+        val u = Uri.parse(song.uri)
+        if (u.scheme == "file") u.path?.let { java.io.File(it).delete() }
+        if (uri?.toString() == song.uri) {
+            player.stop()
+            player.clearMediaItems()
+            uri = null
+            fileName = ""
+            loops.clear()
+            peaks = FloatArray(0)
+            prefs.edit().remove("lastUri").apply()
+        }
+    }
+
+    fun loopCount(song: Song): Int = try {
+        JSONArray(prefs.getString("loops:${song.uri}", "[]")).length()
+    } catch (_: Exception) {
+        0
+    }
 
     // ---------- speed & pitch ----------
 
@@ -377,6 +573,8 @@ class PracticeEngine(private val app: Application) {
         loops.add(Loop(id, start, durationMs, speed = speed))
         loops.sortBy { it.id }
         // Let playback run on past any active loop so you can reach the end point.
+        joinMode = false
+        joined.clear()
         activeId = null
         reps = 0
         selectedId = id
@@ -386,6 +584,7 @@ class PracticeEngine(private val app: Application) {
 
     /** Tap on a letter: sets the end of a new loop, otherwise jumps to the loop and loops it. */
     fun tapLoop(id: Char) {
+        if (joinMode) { toggleJoined(id); return }
         if (awaitingEndId == id) {
             val l = loops.firstOrNull { it.id == id }
             awaitingEndId = null
@@ -411,6 +610,8 @@ class PracticeEngine(private val app: Application) {
 
     /** Tap a loop: jump straight to its start and loop it. */
     fun activate(id: Char) {
+        joinMode = false
+        joined.clear()
         if (awaitingEndId != null && awaitingEndId != id) finishAwaiting()
         val l = loops.firstOrNull { it.id == id } ?: return
         activeId = id
@@ -429,6 +630,8 @@ class PracticeEngine(private val app: Application) {
     }
 
     fun loopOff() {
+        joinMode = false
+        joined.clear()
         activeId = null
         reps = 0
         speed = songSpeed
@@ -446,6 +649,7 @@ class PracticeEngine(private val app: Application) {
     fun deleteSelected() {
         val id = selectedId ?: return
         if (awaitingEndId == id) awaitingEndId = null
+        joined.remove(id)
         loops.removeAll { it.id == id }
         for (i in loops.indices) if (loops[i].next == id) loops[i] = loops[i].copy(next = null)
         if (activeId == id) activeId = null
@@ -551,6 +755,8 @@ class PracticeEngine(private val app: Application) {
             .put("sel", selectedId?.toString() ?: "")
             .put("pos", positionMs)
             .put("mode", stretchMode)
+            .put("joined", joined.joinToString(""))
+            .put("joinMode", joinMode)
             .toString()
         if (st != lastSavedState) {
             prefs.edit().putString("state:$u", st).apply()
@@ -572,6 +778,10 @@ class PracticeEngine(private val app: Application) {
                 activeId = o.optString("active", "").firstOrNull()?.takeIf { c -> loops.any { it.id == c } }
                 o.optString("sel", "").firstOrNull()?.takeIf { c -> loops.any { it.id == c } }?.let { selectedId = it }
                 mode = o.optInt("mode", StretchProcessor.MODE_MELODY)
+                joined.clear()
+                o.optString("joined", "").forEach { c -> if (loops.any { it.id == c }) joined.add(c) }
+                joinMode = o.optBoolean("joinMode", false) && joined.isNotEmpty()
+                if (joined.size >= 2) activeId = null
                 val pos = o.optLong("pos", 0L).coerceAtLeast(0L)
                 player.seekTo(pos)
                 positionMs = pos
